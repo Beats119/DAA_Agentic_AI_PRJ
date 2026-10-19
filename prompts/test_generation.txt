@@ -1,15 +1,56 @@
 ---
-version: "0.1"
+version: "1.0"
 task: test_generation
 model_hint: llama3.1
 temperature: 0
 seed: 42
-timeout_s: 120
-max_tokens: 2048
-status: draft
+timeout_s: 180
+max_tokens: 4096
+status: final
 ---
 
-Design candidate test cases from the extracted specification. Cover normal inputs, boundaries, edge cases, and tricky formatting; each case must state which requirement it covers and why.
+You are an expert test designer for a university programming course. Given the
+extracted assignment specification below, design candidate test cases for a
+student's C program. You are proposing CANDIDATES — a separate oracle
+subsystem will independently validate every expected output before any of it
+counts toward a grade. Never present a guessed expected output as
+established fact.
 
-OUTPUT CONTRACT (Phase 3 will finalize the template):
-Respond with strict JSON: [{id, input, input_category, rationale, requirement_refs, expected: {value, provenance: {tier, method, detail}}}]. Expected values are candidates only — the oracle subsystem validates them; never present a guess as established fact.
+Specification (JSON):
+"""
+{specification_json}
+"""
+
+DESIGN GUIDANCE — use these categories as reasoning prompts, not as a quota:
+- normal: typical valid inputs a correct program handles routinely.
+- edge: empty/minimal input where valid, zero, negative values where allowed,
+  single-element inputs, duplicate values where relevant.
+- boundary: minimum and maximum valid values, off-by-one sizes, limits from
+  the constraints (e.g. INT32_MIN/MAX, n=1, n=max_n).
+- tricky: extra whitespace, tabs, blank lines, unusual but valid formatting,
+  large inputs within stated constraints.
+- invalid: ONLY if the specification defines expected handling for invalid
+  input (e.g. "print ERROR"); otherwise do not invent invalid-input behavior.
+- discriminating: cases that distinguish a plausible WRONG algorithm from the
+  correct one (e.g. an input where bubble sort passes but the required
+  algorithm's edge behavior differs).
+
+RULES:
+1. Every input must respect the specification's input contract. If the spec
+   is silent on some format detail, keep inputs conservative and note the
+   assumption in the rationale.
+2. expected_value is YOUR best computation of the exact stdout — but it is a
+   candidate. Be careful: arithmetic must be right; formatting (spaces,
+   newlines) must match the spec's output format exactly.
+3. Each case cites the requirement IDs it covers (requirement_refs).
+4. rationale: one sentence on what the case probes and why it matters.
+5. IDs unique and stable: T1, T2, …
+6. Keep each input small enough to run in well under a second.
+7. Do NOT include provenance or trust claims — those are the oracle's job.
+
+OUTPUT CONTRACT:
+Reply with a strict JSON array and nothing else, {min_cases} to {max_cases}
+elements, each exactly:
+{"id": "T1", "input": "<stdin text>", "input_category": "normal|edge|boundary|tricky|invalid|discriminating",
+ "rationale": "<one sentence>", "requirement_refs": ["R1", "R3"],
+ "expected_value": "<exact stdout text>"}

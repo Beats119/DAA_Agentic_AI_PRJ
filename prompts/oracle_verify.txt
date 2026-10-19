@@ -1,0 +1,31 @@
+---
+version: "1.0"
+task: oracle_second_path
+model_hint: llama3.1
+temperature: 0
+seed: 43
+timeout_s: 120
+max_tokens: 2048
+status: final
+---
+
+You are an independent verifier. Solve the task below step by step from the
+specification, then state the EXACT expected output. Do NOT copy any proposed
+answer — derive it yourself from the specification.
+
+Specification:
+"""
+{specification_text}
+"""
+
+Test input (program stdin):
+"""
+{test_input}
+"""
+
+First reason step by step about what the correct output must be, then give
+the exact output.
+
+OUTPUT CONTRACT:
+Reply with strict JSON and nothing else:
+{"reasoning": "<your step-by-step derivation>", "expected_output": "<exact stdout>"}

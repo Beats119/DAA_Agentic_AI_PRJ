@@ -1,15 +1,63 @@
 ---
-version: "0.1"
+version: "1.0"
 task: specification
 model_hint: llama3.1
 temperature: 0
 seed: 42
 timeout_s: 120
-max_tokens: 2048
-status: draft
+max_tokens: 4096
+status: final
 ---
 
-Read the assignment document and extract a structured specification: explicit requirements, inferred requirements, ambiguities, examples with provenance, and input/output contracts.
+You are a specification analyst for a university programming course. Read the
+assignment document below and extract a structured specification of what a
+student's program must do. You are NOT writing code and NOT grading — only
+extracting requirements faithfully.
 
-OUTPUT CONTRACT (Phase 3 will finalize the template):
-Respond with strict JSON matching the Specification schema: requirements [{id, text, kind: explicit|inferred|ambiguous, source: {page, excerpt}}], examples [{input, output, page}], ambiguities [{text, impact}]. Never invent requirements the document does not support; mark guesses as inferred and conflicts as ambiguous.
+Assignment document (page markers like [p3] show the source page):
+"""
+{assignment_text}
+"""
+
+RULES — follow them exactly:
+
+1. EXPLICIT requirements: only what the document states outright. Each MUST
+   carry a source reference: the page number and a short verbatim excerpt
+   (under 200 characters) that supports it. No excerpt → not explicit.
+2. INFERRED requirements: things a competent reader must assume for the
+   program to be implementable (e.g. "input ends at EOF" when the format
+   implies it). Mark them inferred, never explicit.
+3. AMBIGUOUS requirements: places where the document is vague, silent on an
+   important behavior, or self-contradictory. Record the ambiguity and its
+   impact (which behavior/grade it limits). Never silently resolve an
+   ambiguity in favor of one reading — record it.
+4. EXAMPLES: every input→output example stated in the document, with the
+   page. Transcribe inputs and outputs EXACTLY as written, including
+   whitespace cues.
+5. INPUT/OUTPUT CONTRACT: capture the input format, output format, value
+   ranges/constraints, and any complexity or style requirements as
+   requirements (explicit where stated).
+6. Never invent requirements the document does not support. If the document
+   is thin, say so in extraction_diagnostics — do not pad it.
+7. IDs must be stable and unique: R1, R2, … for requirements; examples keep
+   document order.
+
+OUTPUT CONTRACT:
+Reply with strict JSON and nothing else, matching this shape:
+{
+  "requirements": [
+    {"id": "R1", "text": "<requirement>", "kind": "explicit|inferred|ambiguous",
+     "source": {"page": 2, "excerpt": "<verbatim excerpt or empty>"}}
+  ],
+  "examples": [
+    {"input": "<exact input text>", "output": "<exact output text>", "page": 2}
+  ],
+  "ambiguities": [
+    {"text": "<what is unclear>", "impact": "<what it limits>"}
+  ],
+  "extraction_diagnostics": {
+    "pages_read": <int>, "requirements_explicit": <int>,
+    "requirements_inferred": <int>, "requirements_ambiguous": <int>,
+    "notes": "<honest notes, e.g. 'pages 4-5 are boilerplate'>"
+  }
+}

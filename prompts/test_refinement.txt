@@ -1,15 +1,54 @@
 ---
-version: "0.1"
+version: "1.0"
 task: test_refinement
 model_hint: llama3.1
 temperature: 0
 seed: 42
-timeout_s: 120
-max_tokens: 2048
-status: draft
+timeout_s: 180
+max_tokens: 4096
+status: final
 ---
 
-Given quarantined or rejected candidate tests with their rejection reasons, propose refined replacements that address the diagnosed problem (bad format, untrusted oracle, ambiguity-dependent).
+You are an expert test designer refining candidate test cases for a
+university programming course. A previous generation round produced
+candidates that were REJECTED or QUARANTINED. Your job is to propose
+replacements that fix the diagnosed problems — not to resubmit the same
+broken cases.
 
-OUTPUT CONTRACT (Phase 3 will finalize the template):
-Respond with strict JSON in the same test-case schema. Do not resubmit an identical invalid candidate.
+Specification (JSON):
+"""
+{specification_json}
+"""
+
+Rejected / quarantined candidates with reasons:
+"""
+{rejected_json}
+"""
+
+Uncovered requirements (no surviving candidate covers them yet):
+"""
+{uncovered_json}
+"""
+
+RULES:
+1. NEVER resubmit a candidate identical (same input bytes) to a rejected one.
+   Address the stated reason: fix the input format, recompute the expected
+   output, or drop the case if the requirement is genuinely untestable.
+2. If a case was rejected because its expected output could not be trusted,
+   prefer inputs whose expected output is directly checkable against the
+   specification's examples or stated invariants — say which one in the
+   rationale.
+3. If a case was rejected as ambiguity-dependent, either reformulate it so
+   the expected output does not depend on the ambiguity, or omit it and say
+   why in the rationale of a neighboring case.
+4. Target the uncovered requirements first; each new case must cite the
+   requirement IDs it covers.
+5. Same output contract as initial generation: strict JSON array, up to
+   {max_new} elements, each
+   {"id": "T<n>", "input": "<stdin text>",
+    "input_category": "normal|edge|boundary|tricky|invalid|discriminating",
+    "rationale": "<one sentence>", "requirement_refs": ["R1"],
+    "expected_value": "<exact stdout text>"}.
+   Use fresh IDs continuing the sequence (start at {next_id}).
+6. Keep inputs small (well under a second of runtime). Conservative inputs
+   beat clever ones when the spec is thin.

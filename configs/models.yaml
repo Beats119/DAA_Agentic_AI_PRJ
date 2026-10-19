@@ -39,3 +39,9 @@ tasks:
     seed: 42
     timeout_s: 120
     max_tokens: 2048
+  feedback_check:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 120
+    max_tokens: 2048
