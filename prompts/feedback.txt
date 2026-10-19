@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: feedback
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Draft student feedback SOLELY from the provided validated evidence. Explain each confirmed failure (test input, trusted expected output, actual output), cite evidence IDs, and suggest concrete fixes.
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON: {summary, per_failure: [{evidence_id, explanation, suggestion}], recommendations: [...]}. Every factual claim must cite an evidence ID. Never invent results, never restate the grade (it is computed deterministically), never contradict the evidence.

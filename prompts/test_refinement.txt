@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: test_refinement
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Given quarantined or rejected candidate tests with their rejection reasons, propose refined replacements that address the diagnosed problem (bad format, untrusted oracle, ambiguity-dependent).
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON in the same test-case schema. Do not resubmit an identical invalid candidate.

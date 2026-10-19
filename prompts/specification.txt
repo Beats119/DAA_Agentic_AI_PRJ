@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: specification
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Read the assignment document and extract a structured specification: explicit requirements, inferred requirements, ambiguities, examples with provenance, and input/output contracts.
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON matching the Specification schema: requirements [{id, text, kind: explicit|inferred|ambiguous, source: {page, excerpt}}], examples [{input, output, page}], ambiguities [{text, impact}]. Never invent requirements the document does not support; mark guesses as inferred and conflicts as ambiguous.

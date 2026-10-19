@@ -1,0 +1,41 @@
+# Task -> model mapping for the Ollama gateway.
+#
+# Startup probes Ollama for actual availability: a configured model that is
+# not installed produces an actionable warning ("run: ollama pull <model>")
+# and the dependent capability degrades explicitly. Models are never
+# silently swapped and no hosted inference is ever used.
+#
+# Defaults target llama3.1 (fits comfortably in 16 GB RAM alongside the
+# toolchain). Tune per task if a smaller/larger local model proves better.
+
+tasks:
+  test_generation:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 180
+    max_tokens: 4096
+  test_refinement:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 180
+    max_tokens: 4096
+  specification:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 120
+    max_tokens: 4096
+  code_review:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 120
+    max_tokens: 2048
+  feedback:
+    model: "llama3.1"
+    temperature: 0
+    seed: 42
+    timeout_s: 120
+    max_tokens: 2048

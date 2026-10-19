@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: feedback_check
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Verify drafted feedback against the evidence registry: every cited evidence ID must exist, every claimed failure must match a recorded result, no claim may contradict recorded facts.
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON: {verdict: pass|fail, violations: [{claim, reason}]}. This pass is supplementary; deterministic checks run first and are authoritative.

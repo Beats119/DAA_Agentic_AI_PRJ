@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: code_review
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Review the C source for readability and maintainability using a structured rubric: naming, comments, formatting, structure, function length, nesting.
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON: {criteria: [{name, score_0_1, evidence, explanation}], suggestions: [...], confidence}. Scores are advisory; they never override deterministic analyzer results.

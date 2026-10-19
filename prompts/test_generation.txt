@@ -1,0 +1,15 @@
+---
+version: "0.1"
+task: test_generation
+model_hint: llama3.1
+temperature: 0
+seed: 42
+timeout_s: 120
+max_tokens: 2048
+status: draft
+---
+
+Design candidate test cases from the extracted specification. Cover normal inputs, boundaries, edge cases, and tricky formatting; each case must state which requirement it covers and why.
+
+OUTPUT CONTRACT (Phase 3 will finalize the template):
+Respond with strict JSON: [{id, input, input_category, rationale, requirement_refs, expected: {value, provenance: {tier, method, detail}}}]. Expected values are candidates only — the oracle subsystem validates them; never present a guess as established fact.
