@@ -207,6 +207,29 @@ class Specification(StrictModel):
 
 
 # ---------------------------------------------------------------------------
+# Assignment document ingestion
+# ---------------------------------------------------------------------------
+
+
+class PageText(StrictModel):
+    page_no: int = Field(ge=1)
+    text: str
+
+
+class AssignmentDoc(StrictModel):
+    """Result of ingesting an assignment document (PDF or plain text).
+
+    Pure data carrier: produced by the ingestion layer, consumed by the
+    specification agent. No LLM involvement.
+    """
+
+    filename: str = Field(min_length=1)
+    sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    text: str = Field(min_length=1)
+    pages: list[PageText] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Test cases (with tiered oracle provenance)
 # ---------------------------------------------------------------------------
 
@@ -220,6 +243,66 @@ class ExpectedProvenance(StrictModel):
 class ExpectedOutput(StrictModel):
     value: str
     provenance: ExpectedProvenance
+
+
+# ---------------------------------------------------------------------------
+# Oracle verdicts and candidate validation
+# ---------------------------------------------------------------------------
+
+
+class TestCandidate(StrictModel):
+    """Raw LLM-proposed test case, before validation and oracle assessment.
+
+    The model proposes ``expected_value`` as a *candidate*; the oracle
+    subsystem decides provenance and status. The model must never invent
+    provenance or claim a trust status.
+    """
+
+    id: str = Field(min_length=1)
+    input: str
+    input_category: str = Field(min_length=1)
+    rationale: str = ""
+    requirement_refs: list[str] = Field(default_factory=list)
+    expected_value: str
+
+
+class OracleVerdict(StrictModel):
+    """Outcome of assessing one test case's expected output.
+
+    Invariant (enforced by tests, not just convention): a Tier-3
+    (LLM-assisted) assessment may NEVER yield status "trusted" on the basis
+    of LLM agreement alone. Agreement is supporting evidence only.
+    """
+
+    status: OracleStatus
+    provenance: ExpectedProvenance
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class ValidationResult(StrictModel):
+    """Deterministic validation of a candidate test case (no LLM)."""
+
+    ok: bool
+    errors: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# LLM generation records
+# ---------------------------------------------------------------------------
+
+
+class GenerationRecord(StrictModel):
+    """Provenance for one structured LLM generation call."""
+
+    task: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    temperature: float
+    seed: int | None = None
+    timeout_s: float = Field(gt=0)
+    prompt_version: str = Field(min_length=1)
+    prompt_hash: str = Field(pattern=r"^sha256:[0-9a-f]{16}$")
+    started_at: datetime = Field(default_factory=_utcnow)
+    duration_s: float = Field(ge=0)
 
 
 class TestCase(StrictModel):
