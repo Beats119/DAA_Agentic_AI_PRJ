@@ -69,6 +69,15 @@ class ExecLimits(StrictModel):
     output_bytes: int = 1_000_000
     fsize_mb: int = 16
     stack_mb: int = 8
+    unlimited_address_space: bool = False
+    """When True, RLIMIT_AS is set to infinity instead of ``memory_mb``.
+
+    Needed ONLY for sanitizer-instrumented binaries (ASan reserves ~15 TB
+    of *virtual* address space for its shadow memory and cannot start under
+    a normal cap). Pair with ``ASAN_OPTIONS=hard_rss_limit_mb=<N>`` so the
+    sanitizer itself caps *physical* memory. Never enable for untrusted,
+    non-instrumented binaries.
+    """
 
 
 class CompilerLimits(ExecLimits):
@@ -112,7 +121,10 @@ def _set_child_rlimits(limits: ExecLimits) -> None:
 
     mem = limits.memory_mb * 1024 * 1024
     resource.setrlimit(resource.RLIMIT_CPU, (int(limits.cpu_time_s), int(limits.cpu_time_s)))
-    resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+    if limits.unlimited_address_space:
+        resource.setrlimit(resource.RLIMIT_AS, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
+    else:
+        resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
     resource.setrlimit(
         resource.RLIMIT_FSIZE, (limits.fsize_mb * 1024 * 1024, limits.fsize_mb * 1024 * 1024)
     )
