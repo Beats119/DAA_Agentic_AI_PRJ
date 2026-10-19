@@ -216,4 +216,4 @@ def test_reference_oracle_honest_without_executor():
         OracleContext(),  # no executor
     )
     assert verdict.status == "inconclusive"
-    assert "Phase 4" in verdict.provenance.detail
+    assert "no execution backend wired" in verdict.provenance.detail
