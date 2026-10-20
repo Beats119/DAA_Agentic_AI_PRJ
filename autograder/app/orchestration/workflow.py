@@ -294,11 +294,18 @@ def evaluate(
             extract_specification,
         )
         from ..testing.generation.agent import generate_test_suite
+        from ..testing.generation.budgets import BudgetTracker
         from ..testing.oracle.service import OracleService
         from ..testing.oracle.strategies import (
             OracleContext,
             ReferenceSolutionOracle,
         )
+
+        # One per-run budget counter (D10), shared by test generation
+        # (tokens), the oracle subsystem and the correctness analyzer
+        # (sandbox executions) so the configured budgets bound the
+        # evaluation as a whole, not each phase in isolation.
+        budget_tracker = BudgetTracker.from_policy(rules.test_generation)
 
         spec = None
         if gateway is not None:
@@ -329,7 +336,9 @@ def evaluate(
         test_stats = {"generated": 0, "validated": 0, "executed": 0,
                       "rejected": 0, "trusted": 0}
         if spec is not None and gateway is not None:
-            suite = generate_test_suite(spec, rules, gateway)
+            suite = generate_test_suite(
+                spec, rules, gateway, budget_tracker=budget_tracker)
+            limitations.extend(suite.get("limitations", []))
             for rec in suite["generation_records"]:
                 model_records.append(_model_record("test_generation", rec))
             candidates = suite["candidates"]
@@ -368,6 +377,7 @@ def evaluate(
                                 memory_mb=rules.limits.memory_limit_mb,
                             ),
                         )
+                        s.set_budget_tracker(budget_tracker)
                         prep = s.prepare(
                             compile=lambda src: {
                                 "ok": False, "binary": None,
@@ -394,7 +404,9 @@ def evaluate(
                         f"could not load instructor expected outputs "
                         f"({exc}); continuing without them")
             ctx = OracleContext(
-                gateway=gateway, instructor_expected=instructor_expected)
+                gateway=gateway, instructor_expected=instructor_expected,
+                budget_tracker=budget_tracker,
+                rules_version=rules.version, rules_hash=rules_hash)
             test_cases, status_counts, chains = service.assess_all(
                 candidates, spec, rules, ctx)
             test_stats["trusted"] = int(status_counts.get("trusted", 0))
@@ -466,6 +478,7 @@ def evaluate(
                 test_cases=test_cases,
                 compile_result=(compile_result
                                 if metric.analyzer == "compiler" else None),
+                budget_tracker=budget_tracker,
             )
             jobs.append(AnalyzerJob(
                 metric_name=metric.name,
@@ -598,10 +611,15 @@ def evaluate(
             res = results.get(mc.name)
             # Use the scoring engine's (possibly renormalized) weight so the
             # report reconciles: contribution == 100 * weight * score.
+            # Policy 1.1: expose BOTH the configured weight (rules) and the
+            # effective weight (engine) explicitly.
             metrics_report.append(ReportMetric(
                 name=mc.name,
                 analyzer=mc.analyzer,
-                weight=float(ms.weight) if ms else float(mc.weight),
+                weight=float(ms.effective_weight) if ms else float(mc.weight),
+                configured_weight=float(mc.weight),
+                effective_weight=(float(ms.effective_weight)
+                                  if ms else float(mc.weight)),
                 score=float(ms.score) if ms and ms.score is not None else None,
                 contribution=float(ms.contribution) if ms else 0.0,
                 status=res.status if res else "missing",
@@ -702,7 +720,7 @@ def evaluate(
                 ),
             ),
         )
-        validate_report(report)
+        validate_report(report, rules)
 
         manifest = RunManifest(
             run_id=run_id,

@@ -23,13 +23,37 @@ policy:
 - Inconclusive correctness evidence never becomes a confirmed failure: an
   analyzer with ``status="inconclusive"`` is not eligible, so its would-be
   score cannot move the grade.
+- **No eligible evidence means no grade (policy 1.1).** If *no* metric
+  contributes eligible evidence — and no metric was explicitly zeroed by
+  the ``zero`` missing-evidence policy (an explicit instructor choice,
+  which does produce a defensible 0.0) — the result is ``grade=None``,
+  status ``incomplete``, with the reason ``"no eligible metric evidence"``.
+  A *confirmed* zero (eligible metrics that genuinely scored 0) still
+  yields grade ``0.0``; the two outcomes are deliberately distinguishable.
+- Non-finite scores (NaN / ±inf) are never eligible and never propagate
+  into the grade; they are treated as missing evidence with an explicit
+  warning. (The ``AnalyzerResult`` schema already rejects them; this is
+  defense in depth for results that bypass schema validation.)
+- Duplicate results for the same metric raise :class:`ValueError`:
+  duplicates indicate an orchestration bug and must not be papered over.
+- Every :class:`MetricScore` exposes both the **configured** weight (from
+  the rules) and the **effective** weight actually applied after the
+  missing-evidence policy; ``weight`` remains as an alias of the effective
+  weight for backward compatibility.
 
 ``POLICY_VERSION`` is recorded on every result and report; bump it whenever
 this module's semantics change.
+
+Policy changelog:
+- ``1.1`` — zero eligible evidence -> grade ``None``/``incomplete`` (was a
+  manufactured ``0.0``); dual configured/effective weights exposed;
+  non-finite scores explicitly ineligible.
+- ``1.0`` — initial policy.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
@@ -37,7 +61,7 @@ from typing import Literal
 from ..core.numbers import quantize_tenth, to_decimal
 from ..core.schemas import AnalyzerResult, RuleSet
 
-POLICY_VERSION = "1.0"
+POLICY_VERSION = "1.1"
 
 ScoreStatus = Literal["complete", "completed_with_warnings", "incomplete"]
 
@@ -45,7 +69,13 @@ ScoreStatus = Literal["complete", "completed_with_warnings", "incomplete"]
 @dataclass(frozen=True)
 class MetricScore:
     """Per-metric contribution. ``contribution`` is full precision (unrounded)
-    so report totals reconcile: ``sum(contributions)`` rounds to ``grade``."""
+    so report totals reconcile: ``sum(contributions)`` rounds to ``grade``.
+
+    ``configured_weight`` is the weight from the rules; ``effective_weight``
+    is the weight actually applied after the missing-evidence policy
+    (renormalized, kept, or 0 for an excluded metric). ``weight`` is kept as
+    an alias of ``effective_weight`` for backward compatibility.
+    """
 
     name: str
     analyzer: str
@@ -54,6 +84,8 @@ class MetricScore:
     contribution: Decimal
     status: str
     note: str
+    configured_weight: Decimal = Decimal(0)
+    effective_weight: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)
@@ -69,8 +101,16 @@ def _eligible(result: AnalyzerResult) -> bool:
     return (
         result.status == "completed"
         and result.score is not None
+        and math.isfinite(result.score)
         and 0.0 <= result.score <= 1.0
     )
+
+
+def _finite_score(result: AnalyzerResult | None) -> Decimal | None:
+    """The result's score as a Decimal, or None when absent/non-finite."""
+    if result is None or result.score is None or not math.isfinite(result.score):
+        return None
+    return to_decimal(result.score)
 
 
 def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
@@ -100,11 +140,13 @@ def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
         if res is not None and _eligible(res):
             continue  # handled in the aggregation pass below
         # --- missing evidence: apply the configured policy ---
-        reason = (
-            f"no result"
-            if res is None
-            else f"status={res.status}, score={res.score}"
-        )
+        if res is None:
+            reason = "no result"
+        elif res.score is not None and not math.isfinite(res.score):
+            # A non-finite score is not evidence; never let it near the grade.
+            reason = f"status={res.status}, score is not finite ({res.score})"
+        else:
+            reason = f"status={res.status}, score={res.score}"
         if mc.required:
             mode = rules.uncertainty_policy.required_metric_missing
             if mode == "incomplete":
@@ -144,15 +186,18 @@ def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
     if incomplete:
         for mc in rules.metrics:
             res = by_name.get(mc.name)
+            w = to_decimal(mc.weight)
             per_metric.append(
                 MetricScore(
                     name=mc.name,
                     analyzer=mc.analyzer,
-                    weight=to_decimal(mc.weight),
-                    score=to_decimal(res.score) if res and res.score is not None else None,
+                    weight=w,
+                    score=_finite_score(res),
                     contribution=Decimal(0),
                     status=res.status if res else "missing",
                     note="evaluation incomplete: required evidence missing",
+                    configured_weight=w,
+                    effective_weight=w,
                 )
             )
         return ScoreResult(
@@ -171,6 +216,56 @@ def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
         for mc in rules.metrics
         if mc.name not in excluded and by_name.get(mc.name) is not None and _eligible(by_name[mc.name])
     ]
+
+    def _surface_status_warnings() -> None:
+        # Surface every non-clean analyzer status — the report must show
+        # what actually happened, even for metrics excluded from scoring.
+        for mc in rules.metrics:
+            res = by_name.get(mc.name)
+            if res is not None and res.status != "completed":
+                warnings.append(f"metric {mc.name!r}: analyzer reported {res.status}")
+
+    if not eligible and not zeroed:
+        # Policy 1.1 (D6): NO metric contributes eligible evidence, and no
+        # metric was explicitly zeroed by policy. A grade here would be
+        # manufactured from nothing — return None + incomplete instead of
+        # the old 0.0. (A confirmed zero — eligible metrics scoring 0 —
+        # still produces 0.0 below; an explicit `zero` policy produces 0.0
+        # via `zeroed`.)
+        _surface_status_warnings()
+        warnings.append(
+            "no eligible metric evidence: every configured metric was "
+            "unavailable, ineligible, or excluded; grade is None "
+            "(incomplete), not a manufactured 0.0"
+        )
+        for mc in rules.metrics:
+            res = by_name.get(mc.name)
+            w = to_decimal(mc.weight)
+            note = (
+                "excluded from scoring by missing-evidence policy"
+                if mc.name in excluded
+                else "no eligible evidence"
+            )
+            per_metric.append(
+                MetricScore(
+                    name=mc.name,
+                    analyzer=mc.analyzer,
+                    weight=Decimal(0) if mc.name in excluded else w,
+                    score=_finite_score(res),
+                    contribution=Decimal(0),
+                    status=res.status if res else "missing",
+                    note=f"evaluation incomplete: no eligible metric evidence ({note})",
+                    configured_weight=w,
+                    effective_weight=Decimal(0) if mc.name in excluded else w,
+                )
+            )
+        return ScoreResult(
+            grade=None,
+            per_metric=tuple(per_metric),
+            status="incomplete",
+            warnings=tuple(warnings),
+        )
+
     total_w = sum(to_decimal(mc.weight) for mc, _ in eligible)
     if renormalize_needed and total_w > 0:
         scale = Decimal(1) / total_w
@@ -187,16 +282,18 @@ def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
         res = by_name.get(mc.name)
         if mc.name in excluded:
             per_metric.append(
-                MetricScore(mc.name, mc.analyzer, w, None, Decimal(0),
+                MetricScore(mc.name, mc.analyzer, Decimal(0), None, Decimal(0),
                             res.status if res else "missing",
-                            "excluded from scoring by missing-evidence policy")
+                            "excluded from scoring by missing-evidence policy",
+                            configured_weight=w, effective_weight=Decimal(0))
             )
             continue
         if mc.name in zeroed:
             per_metric.append(
                 MetricScore(mc.name, mc.analyzer, w, Decimal(0), Decimal(0),
                             res.status if res else "missing",
-                            "unavailable: scored 0 with weight kept (policy=zero)")
+                            "unavailable: scored 0 with weight kept (policy=zero)",
+                            configured_weight=w, effective_weight=w)
             )
             continue
         # eligible: status == "completed" and score is not None (see _eligible)
@@ -204,16 +301,24 @@ def score(metrics: list[AnalyzerResult], rules: RuleSet) -> ScoreResult:
         w_eff = w * scale
         contrib = Decimal(100) * w_eff * s
         total += w_eff * s
+        # ``weight`` records the EFFECTIVE weight: when the
+        # missing-evidence policy renormalizes, contribution must equal
+        # 100 * weight * score (the report reconciliation invariant).
+        # Policy 1.1 also exposes ``configured_weight`` (the rules value)
+        # alongside it, so renormalization is visible in the data, not
+        # only in this note.
+        note = ""
+        if scale != 1:
+            note = (
+                f"weight renormalized {w} -> {w_eff} "
+                "(missing-evidence policy; see run warnings)"
+            )
         per_metric.append(
-            MetricScore(mc.name, mc.analyzer, w, s, contrib, res.status, "")
+            MetricScore(mc.name, mc.analyzer, w_eff, s, contrib, res.status,
+                        note, configured_weight=w, effective_weight=w_eff)
         )
 
-    # Surface every non-clean analyzer status, even when the metric was
-    # excluded from scoring — the report must show what actually happened.
-    for mc in rules.metrics:
-        res = by_name.get(mc.name)
-        if res is not None and res.status != "completed":
-            warnings.append(f"metric {mc.name!r}: analyzer reported {res.status}")
+    _surface_status_warnings()
 
     grade = quantize_tenth(Decimal(100) * total)
     status: ScoreStatus = "complete" if not warnings else "completed_with_warnings"

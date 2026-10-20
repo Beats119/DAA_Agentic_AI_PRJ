@@ -30,13 +30,14 @@
 
   <h3>Metrics</h3>
   <table class="metrics">
-    <thead><tr><th>Metric</th><th>Analyzer</th><th>Weight</th><th>Score</th><th>Contribution</th><th>Status</th></tr></thead>
+    <thead><tr><th>Metric</th><th>Analyzer</th><th>Weight (configured)</th><th>Weight (effective)</th><th>Score</th><th>Contribution</th><th>Status</th></tr></thead>
     <tbody>
     {% for m in report.metrics %}
       <tr>
         <td>{{ m.name }}</td>
         <td class="mono">{{ m.analyzer }}</td>
-        <td class="num">{{ "%.2f"|format(m.weight) }}</td>
+        <td class="num">{{ "%.2f"|format(m.configured_weight if m.configured_weight is not none else m.weight) }}</td>
+        <td class="num">{{ "%.2f"|format(m.effective_weight if m.effective_weight is not none else m.weight) }}</td>
         <td class="num">{{ "%.3f"|format(m.score) if m.score is not none else "—" }}</td>
         <td class="num">{{ "%.2f"|format(m.contribution) }}</td>
         <td><span class="badge badge-{{ m.status }}">{{ m.status }}</span></td>
@@ -44,7 +45,7 @@
     {% endfor %}
     </tbody>
     {% if report.grade is not none %}
-    <tfoot><tr><td colspan="4" class="num"><strong>Total</strong></td><td class="num"><strong>{{ "%.2f"|format(contrib_total) }}</strong></td><td></td></tr></tfoot>
+    <tfoot><tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num"><strong>{{ "%.2f"|format(contrib_total) }}</strong></td><td></td></tr></tfoot>
     {% endif %}
   </table>
   {% if report.grade is not none %}

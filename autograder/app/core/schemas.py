@@ -303,6 +303,10 @@ class GenerationRecord(StrictModel):
     prompt_hash: str = Field(pattern=r"^sha256:[0-9a-f]{16}$")
     started_at: datetime = Field(default_factory=_utcnow)
     duration_s: float = Field(ge=0)
+    # Token usage for this call (all attempts): Ollama's reported
+    # eval_count + prompt_eval_count when present, otherwise the gateway's
+    # documented estimate. Consumed by the generation budget tracker (D10).
+    tokens_used: int = Field(default=0, ge=0)
 
 
 class TestCase(StrictModel):
@@ -393,7 +397,16 @@ class RulesRef(StrictModel):
 class ReportMetric(StrictModel):
     name: str
     analyzer: str
+    # ``weight`` is the EFFECTIVE weight (kept for backward compatibility:
+    # it is what ``contribution == 100 * weight * score`` reconciles
+    # against). Policy 1.1 additionally exposes both weights explicitly:
+    # ``configured_weight`` is the weight from the rules file and
+    # ``effective_weight`` the weight actually applied after the
+    # missing-evidence policy (renormalization / exclusion). They are
+    # optional so reports written before policy 1.1 still validate.
     weight: float = Field(ge=0)
+    configured_weight: float | None = Field(default=None, ge=0)
+    effective_weight: float | None = Field(default=None, ge=0)
     score: float | None = None
     contribution: float = 0.0
     status: str = ""
@@ -456,8 +469,17 @@ class Report(StrictModel):
     limitations: list[str] = Field(default_factory=list)
     tool_versions: dict[str, str] = Field(default_factory=dict)
     models: list[ModelRecord] = Field(default_factory=list)
-    scoring_policy_version: str = "1.0"
+    # Must equal scoring.engine.POLICY_VERSION (single-sourced there; the
+    # literal is duplicated here only because core.schemas cannot import
+    # the scoring package without a cycle). validate_report enforces the
+    # match, so drift fails loudly rather than silently.
+    scoring_policy_version: str = "1.1"
     reproduction: ReproductionInfo | None = None
+    # DECISION (Phase 6): the verified student feedback text, as plain data.
+    # Optional so older reports still validate. The feedback path can never
+    # alter the grade or the analyzer evidence — it is evidence rendered
+    # into prose, stored here for the report consumer.
+    feedback: dict[str, Any] | None = None
 
     @field_validator("grade")
     @classmethod
@@ -482,4 +504,5 @@ class RunManifest(StrictModel):
     tool_versions: dict[str, str] = Field(default_factory=dict)
     model_settings: dict[str, Any] = Field(default_factory=dict)
     prompt_versions: dict[str, str] = Field(default_factory=dict)
-    scoring_policy_version: str = "1.0"
+    # See Report.scoring_policy_version: must match scoring.engine.POLICY_VERSION.
+    scoring_policy_version: str = "1.1"
