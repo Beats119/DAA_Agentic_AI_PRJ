@@ -138,9 +138,9 @@
  "uncertainty": [
   "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
   "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
-  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
   "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
   "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
   "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
   "LLM feedback unavailable: no LLM gateway for this run; deterministic fallback used.",
   "feedback rendered by the deterministic fallback (no LLM gateway)",
@@ -156,9 +156,9 @@
  "limitations": [
   "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
   "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
-  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
   "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
   "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
   "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
   "feedback rendered by the deterministic fallback (no LLM gateway)"
  ],
@@ -169,10 +169,10 @@
   "python": "3.12.3",
   "compiler": "gcc",
   "c_standard": "c11",
-  "analyzer:correctness": "correctness-1.0",
   "analyzer:compiler": "compiler-1.0",
   "analyzer:static_analysis": "static_analysis-1.0",
   "analyzer:modularity": "modularity-1.0",
+  "analyzer:correctness": "correctness-1.0",
   "analyzer:complexity": "complexity-1.0",
   "analyzer:readability": "readability-1.0",
   "analyzer:similarity": "similarity-1.0",
@@ -223,9 +223,9 @@
   "uncertainty_notes": [
    "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
    "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
-   "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
    "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
    "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+   "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
    "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
    "LLM feedback unavailable: no LLM gateway for this run; deterministic fallback used."
   ]

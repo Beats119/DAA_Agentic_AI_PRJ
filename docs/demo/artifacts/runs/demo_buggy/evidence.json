@@ -1,0 +1,213 @@
+[
+ {
+  "id": "ev:demo_buggy:1",
+  "analyzer": "ingestion",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:44.764233Z",
+  "kind": "assignment_ingested",
+  "data": {
+   "filename": "assignment_add.txt",
+   "sha256": "sha256:6ea3b6bf64cecce60f557525aef81ea9c8370b4ce65e611ea5dcd1e463b844c0",
+   "pages": 1,
+   "chars": 483
+  },
+  "severity": null,
+  "confidence": null,
+  "affects_grade": false
+ },
+ {
+  "id": "ev:demo_buggy:2",
+  "analyzer": "planner",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:44.805026Z",
+  "kind": "evaluation_plan",
+  "data": {
+   "steps": [
+    "ingest",
+    "validate_rules",
+    "extract_spec",
+    "compile",
+    "generate_tests",
+    "oracle_assess",
+    "static_analyzers",
+    "correctness",
+    "score",
+    "feedback",
+    "report"
+   ],
+   "analyzer_ids": [
+    "correctness",
+    "compiler",
+    "static_analysis",
+    "modularity",
+    "complexity",
+    "memory_safety",
+    "readability",
+    "similarity"
+   ],
+   "warnings": [],
+   "spec_warning_deferred": "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)"
+  },
+  "severity": null,
+  "confidence": null,
+  "affects_grade": false
+ },
+ {
+  "id": "ev:demo_buggy:3",
+  "analyzer": "sandbox",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:45.131605Z",
+  "kind": "sandbox_capabilities",
+  "data": {
+   "user_namespaces": false,
+   "network_namespace": true,
+   "seccomp": true,
+   "cgroup_v2": false,
+   "resource_limits": true,
+   "landlock_abi": 8,
+   "landlock_driver_abi": 1,
+   "compiler": "/usr/bin/gcc"
+  },
+  "severity": null,
+  "confidence": null,
+  "affects_grade": false
+ },
+ {
+  "id": "ev:demo_buggy:4",
+  "analyzer": "compiler",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:45.587067Z",
+  "kind": "compile_result",
+  "data": {
+   "ok": true,
+   "returncode": 0,
+   "diagnostics": [],
+   "warnings": [],
+   "raw_stderr": "",
+   "raw_stdout": "",
+   "binary_sha256": "7ef05a828e6e2b0988c6effc82607e6e8787017845c4949f82599a3e3c633e16",
+   "wall_s": 0.33883591599987994,
+   "timed_out": false,
+   "compiler": "gcc"
+  },
+  "severity": null,
+  "confidence": null,
+  "affects_grade": false
+ },
+ {
+  "id": "ev:demo_buggy:5",
+  "analyzer": "correctness",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:48.535634Z",
+  "kind": "no_trusted_tests",
+  "data": {
+   "total_candidates": 0,
+   "status_breakdown": {
+    "trusted": 0,
+    "provisional": 0,
+    "rejected": 0,
+    "inconclusive": 0
+   }
+  },
+  "severity": null,
+  "confidence": null,
+  "affects_grade": false
+ },
+ {
+  "id": "ev:demo_buggy:6",
+  "analyzer": "compiler",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:48.535673Z",
+  "kind": "compile_result",
+  "data": {
+   "ok": true,
+   "returncode": 0,
+   "compiler": "gcc",
+   "binary_sha256": "7ef05a828e6e2b0988c6effc82607e6e8787017845c4949f82599a3e3c633e16",
+   "wall_s": 0.33883591599987994,
+   "timed_out": false,
+   "diagnostics": []
+  },
+  "severity": null,
+  "confidence": 1.0,
+  "affects_grade": true
+ },
+ {
+  "id": "ev:demo_buggy:7",
+  "analyzer": "static_analysis",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:48.535686Z",
+  "kind": "static_findings",
+  "data": {
+   "tool_breakdown": {
+    "builtin": 0,
+    "cppcheck": 0,
+    "cppcheck_status": "unavailable",
+    "cppcheck_state": "not_installed",
+    "cppcheck_detail": "cppcheck is not installed on this host"
+   },
+   "checks_run": [
+    "builtin.dangerous-gets",
+    "builtin.unbounded-strcpy",
+    "builtin.unbounded-strcat",
+    "builtin.unbounded-sprintf",
+    "builtin.system-call",
+    "builtin.scanf-no-width",
+    "builtin.main-no-return",
+    "cppcheck: not installed"
+   ],
+   "findings": []
+  },
+  "severity": null,
+  "confidence": 0.7,
+  "affects_grade": true
+ },
+ {
+  "id": "ev:demo_buggy:8",
+  "analyzer": "modularity",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:48.535698Z",
+  "kind": "modularity",
+  "data": {
+   "function_count": 2,
+   "functions": [
+    {
+     "name": "add",
+     "start_line": 3,
+     "loc": 3
+    },
+    {
+     "name": "main",
+     "start_line": 7,
+     "loc": 8
+    }
+   ],
+   "parse_confidence": 1.0,
+   "parse_candidates": 2,
+   "max_loc": 8,
+   "avg_loc": 5.5,
+   "exclude_main_from_length": true
+  },
+  "severity": null,
+  "confidence": 1.0,
+  "affects_grade": true
+ },
+ {
+  "id": "ev:demo_buggy:9",
+  "analyzer": "complexity",
+  "run_id": "demo_buggy",
+  "timestamp": "2026-10-20T13:10:48.535705Z",
+  "kind": "complexity",
+  "data": {
+   "inferred_class": "O(1)",
+   "required_class": "O(1)",
+   "max_loop_nesting": 0,
+   "recursion_detected": false,
+   "timing": [],
+   "timing_caveat": "timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)"
+  },
+  "severity": null,
+  "confidence": 0.8,
+  "affects_grade": true
+ }
+]

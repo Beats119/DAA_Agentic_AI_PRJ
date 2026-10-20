@@ -1,0 +1,16 @@
+{
+ "summary": "No test achieved a trustworthy oracle, so correctness could not be confirmed from test evidence. The evaluation completed on the remaining analyzers; see the uncertainty notes. Run status: incomplete.",
+ "per_failure": [],
+ "recommendations": [
+  "[complexity] inferred O(1) matches required O(1)"
+ ],
+ "uncertainty_notes": [
+  "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
+  "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
+  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
+  "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
+  "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+  "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
+  "LLM feedback unavailable: no LLM gateway for this run; deterministic fallback used."
+ ]
+}

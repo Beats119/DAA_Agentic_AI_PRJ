@@ -1,0 +1,17 @@
+Assignment: Add Two Integers (synthetic demo)
+
+Write a C program that reads two integers from standard input and prints
+their sum followed by a newline.
+
+Input format: two integers separated by whitespace on standard input.
+Output format: a single integer — the sum — followed by a newline.
+
+Example:
+  Input:
+  2 3
+  Output:
+  5
+
+Constraints: the program must handle negative integers. Expected time
+complexity: O(1). Do not use any external libraries beyond the C standard
+library.

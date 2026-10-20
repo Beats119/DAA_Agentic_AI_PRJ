@@ -1,0 +1,233 @@
+{
+ "run_id": "demo_buggy",
+ "submission": {
+  "id": "buggy_add",
+  "source_hash": "sha256:47d08392c2319f4862d8f4f47b33c9a774e6e541141df103012c1b1c6c5d3f83"
+ },
+ "assignment": {
+  "id": "assignments/add_two_integers.pdf",
+  "spec_hash": "sha256:6ea3b6bf64cecce60f557525aef81ea9c8370b4ce65e611ea5dcd1e463b844c0"
+ },
+ "rules": {
+  "version": "1.0.0",
+  "hash": "sha256:f3e0655bc2169b9789bbb7be01e863afc9bdca14b052f5d441585bef03bbaaeb"
+ },
+ "grade": null,
+ "status": "incomplete",
+ "evidence_coverage": {
+  "evidence_records": 9,
+  "grade_affecting": 4,
+  "metrics_completed": 4,
+  "metrics_total": 8
+ },
+ "metrics": [
+  {
+   "name": "correctness",
+   "analyzer": "correctness",
+   "weight": 0.35,
+   "configured_weight": 0.35,
+   "effective_weight": 0.35,
+   "score": null,
+   "contribution": 0.0,
+   "status": "inconclusive"
+  },
+  {
+   "name": "compiler",
+   "analyzer": "compiler",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": 1.0,
+   "contribution": 0.0,
+   "status": "completed"
+  },
+  {
+   "name": "static_analysis",
+   "analyzer": "static_analysis",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": 1.0,
+   "contribution": 0.0,
+   "status": "completed"
+  },
+  {
+   "name": "modularity",
+   "analyzer": "modularity",
+   "weight": 0.05,
+   "configured_weight": 0.05,
+   "effective_weight": 0.05,
+   "score": 1.0,
+   "contribution": 0.0,
+   "status": "completed"
+  },
+  {
+   "name": "complexity",
+   "analyzer": "complexity",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": 1.0,
+   "contribution": 0.0,
+   "status": "completed"
+  },
+  {
+   "name": "memory_safety",
+   "analyzer": "memory_safety",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": null,
+   "contribution": 0.0,
+   "status": "inconclusive"
+  },
+  {
+   "name": "readability",
+   "analyzer": "readability",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": null,
+   "contribution": 0.0,
+   "status": "inconclusive"
+  },
+  {
+   "name": "similarity",
+   "analyzer": "similarity",
+   "weight": 0.1,
+   "configured_weight": 0.1,
+   "effective_weight": 0.1,
+   "score": null,
+   "contribution": 0.0,
+   "status": "skipped"
+  }
+ ],
+ "analyzer_statuses": {
+  "correctness": "inconclusive",
+  "compiler": "completed",
+  "static_analysis": "completed",
+  "modularity": "completed",
+  "complexity": "completed",
+  "memory_safety": "inconclusive",
+  "readability": "inconclusive",
+  "similarity": "skipped"
+ },
+ "test_stats": {
+  "generated": 0,
+  "validated": 0,
+  "executed": 0,
+  "rejected": 0,
+  "trusted": 0
+ },
+ "passing_tests": 0,
+ "failing_tests": [],
+ "compiler_diagnostics": [],
+ "runtime_measurements": {},
+ "memory_safety": null,
+ "complexity": {
+  "inferred_class": "O(1)",
+  "required_class": "O(1)",
+  "max_loop_nesting": 0,
+  "recursion_detected": false,
+  "timing_samples": 0
+ },
+ "similarity": null,
+ "suggestions": [
+  "[complexity] inferred O(1) matches required O(1)"
+ ],
+ "uncertainty": [
+  "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
+  "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
+  "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
+  "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
+  "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
+  "LLM feedback unavailable: no LLM gateway for this run; deterministic fallback used.",
+  "feedback rendered by the deterministic fallback (no LLM gateway)",
+  "[correctness] no trusted oracle evidence — correctness is inconclusive, not zero (see oracle provenance in the report)",
+  "[readability] readability review needs the local model; none was provided",
+  "[similarity] similarity corpus is empty — nothing to compare against",
+  "[memory_safety] no trusted tests — sanitizer runs need inputs to execute",
+  "required metric 'correctness' unavailable (status=inconclusive, score=None); marking evaluation incomplete (grade None)",
+  "optional metric 'memory_safety' unavailable (status=inconclusive, score=None); renormalizing remaining weights",
+  "optional metric 'readability' unavailable (status=inconclusive, score=None); renormalizing remaining weights",
+  "optional metric 'similarity' unavailable (status=skipped, score=None); renormalizing remaining weights"
+ ],
+ "limitations": [
+  "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
+  "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
+  "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
+  "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+  "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
+  "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
+  "feedback rendered by the deterministic fallback (no LLM gateway)"
+ ],
+ "tool_versions": {
+  "app": "0.1.0",
+  "sandbox": "sandbox-2.0",
+  "scoring_policy": "1.1",
+  "python": "3.12.3",
+  "compiler": "gcc",
+  "c_standard": "c11",
+  "analyzer:compiler": "compiler-1.0",
+  "analyzer:static_analysis": "static_analysis-1.0",
+  "analyzer:modularity": "modularity-1.0",
+  "analyzer:correctness": "correctness-1.0",
+  "analyzer:complexity": "complexity-1.0",
+  "analyzer:readability": "readability-1.0",
+  "analyzer:similarity": "similarity-1.0",
+  "analyzer:memory_safety": "memory_safety-1.0"
+ },
+ "models": [
+  {
+   "task": "specification",
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "timeout_s": 0.0,
+   "max_tokens": 0,
+   "prompt_version": "none"
+  },
+  {
+   "task": "test_generation",
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "timeout_s": 0.0,
+   "max_tokens": 0,
+   "prompt_version": "none"
+  },
+  {
+   "task": "feedback",
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "timeout_s": 0.0,
+   "max_tokens": 0,
+   "prompt_version": "none"
+  }
+ ],
+ "scoring_policy_version": "1.1",
+ "reproduction": {
+  "run_id": "demo_buggy",
+  "rules_hash": "sha256:f3e0655bc2169b9789bbb7be01e863afc9bdca14b052f5d441585bef03bbaaeb",
+  "scoring_policy_version": "1.1",
+  "notes": "Deterministic scoring: identical (assignment, source, rules, tool versions, model ids, prompt versions) and identical validated evidence -> identical score. LLM steps (spec extraction, test generation, feedback drafting) may vary between runs within the +/-7 grade-point acceptance bar; test generation is fresh every run by design, never served from a cache."
+ },
+ "feedback": {
+  "summary": "No test achieved a trustworthy oracle, so correctness could not be confirmed from test evidence. The evaluation completed on the remaining analyzers; see the uncertainty notes. Run status: incomplete.",
+  "per_failure": [],
+  "recommendations": [
+   "[complexity] inferred O(1) matches required O(1)"
+  ],
+  "uncertainty_notes": [
+   "no LLM gateway for this run: specification extraction and test generation skipped; correctness will be inconclusive",
+   "no specification available: LLM test generation is impossible; correctness will be inconclusive and the run will carry completed_with_warnings (or incomplete for required metrics)",
+   "[static_analysis] cppcheck is not installed on this host — only built-in checks ran (install cppcheck for deeper analysis)",
+   "[modularity] regex-based parsing is approximate; complex macros or K&R style may reduce parse confidence",
+   "[correctness] only tests with oracle status 'trusted' contribute confirmed correctness evidence",
+   "[complexity] timing measurements are recorded for corroboration only and are never used as proof of a Big-O class (spec sec 13.6)",
+   "LLM feedback unavailable: no LLM gateway for this run; deterministic fallback used."
+  ]
+ }
+}

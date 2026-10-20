@@ -1,9 +1,13 @@
+# AutoGrader pinned dependencies (portable lock).
+# Generated with pip freeze from a clean venv containing exactly the
+# dependencies declared in pyproject.toml (runtime) plus the dev tools
+# pytest and ruff. Contains NO local paths and NO editable
+# self-reference: install this file first, then the project itself
+# with `pip install -e . --no-deps` (see docs/INSTALL.md).
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
-# Editable install with no version control (autograder==0.1.0)
--e /home/hatch/workspace/daa_prj
-certifi==2026.10.18
+certifi==2026.10.19
 click==8.5.0
 fastapi==0.149.0
 flatbuffers==25.12.19
@@ -33,6 +37,7 @@ pytest==9.1.1
 python-dotenv==1.2.4
 python-multipart==0.0.32
 PyYAML==6.0.3
+ruff==0.17.1
 starlette==1.9.0
 tabulate==0.10.0
 typing-inspection==0.4.4

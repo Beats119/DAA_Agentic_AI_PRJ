@@ -1,0 +1,52 @@
+{
+ "run_id": "demo_buggy",
+ "created_at": "2026-10-20T13:10:48.580663Z",
+ "finished_at": "2026-10-20T13:10:48.580642Z",
+ "state": "incomplete",
+ "submission_hash": "sha256:47d08392c2319f4862d8f4f47b33c9a774e6e541141df103012c1b1c6c5d3f83",
+ "assignment_hash": "sha256:6ea3b6bf64cecce60f557525aef81ea9c8370b4ce65e611ea5dcd1e463b844c0",
+ "rules_hash": "sha256:f3e0655bc2169b9789bbb7be01e863afc9bdca14b052f5d441585bef03bbaaeb",
+ "rules_version": "1.0.0",
+ "tool_versions": {
+  "app": "0.1.0",
+  "sandbox": "sandbox-2.0",
+  "scoring_policy": "1.1",
+  "python": "3.12.3",
+  "compiler": "gcc",
+  "c_standard": "c11",
+  "analyzer:compiler": "compiler-1.0",
+  "analyzer:static_analysis": "static_analysis-1.0",
+  "analyzer:modularity": "modularity-1.0",
+  "analyzer:correctness": "correctness-1.0",
+  "analyzer:complexity": "complexity-1.0",
+  "analyzer:readability": "readability-1.0",
+  "analyzer:similarity": "similarity-1.0",
+  "analyzer:memory_safety": "memory_safety-1.0"
+ },
+ "model_settings": {
+  "specification": {
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "prompt_version": "none"
+  },
+  "test_generation": {
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "prompt_version": "none"
+  },
+  "feedback": {
+   "model": "none (llm unavailable)",
+   "temperature": 0.0,
+   "seed": null,
+   "prompt_version": "none"
+  }
+ },
+ "prompt_versions": {
+  "specification": "none",
+  "test_generation": "none",
+  "feedback": "none"
+ },
+ "scoring_policy_version": "1.1"
+}
