@@ -142,8 +142,36 @@ class OllamaClient:
         temperature: float = 0.0,
         seed: int | None = 42,
         timeout_s: float | None = None,
+        num_predict: int | None = None,
     ) -> str:
         """Raw text generation. Prefer :meth:`generate_structured`."""
+        text, _usage = self._generate_full(
+            prompt,
+            model=model,
+            temperature=temperature,
+            seed=seed,
+            timeout_s=timeout_s,
+            num_predict=num_predict,
+        )
+        return text
+
+    def _generate_full(
+        self,
+        prompt: str,
+        model: str,
+        temperature: float = 0.0,
+        seed: int | None = 42,
+        timeout_s: float | None = None,
+        num_predict: int | None = None,
+    ) -> tuple[str, int]:
+        """Generate once; return ``(text, tokens_used)``.
+
+        ``num_predict`` is forwarded to Ollama as the output-length cap —
+        the configured ``max_tokens`` is actually enforced (D27), not just
+        recorded. ``tokens_used`` is Ollama's reported
+        ``prompt_eval_count + eval_count`` when the server provides both;
+        otherwise the documented estimate ``len//4`` per side.
+        """
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -152,13 +180,21 @@ class OllamaClient:
         }
         if seed is not None:
             payload["options"]["seed"] = seed
+        if num_predict is not None:
+            payload["options"]["num_predict"] = int(num_predict)
         body = self._post(
             _API_GENERATE, payload, timeout_s if timeout_s is not None else self.timeout_s
         )
         text = body.get("response", "")
         if not isinstance(text, str) or not text:
             raise OllamaBadResponse("Ollama returned an empty response")
-        return text
+        eval_count = body.get("eval_count")
+        prompt_eval_count = body.get("prompt_eval_count")
+        if isinstance(eval_count, int) and isinstance(prompt_eval_count, int):
+            tokens_used = eval_count + prompt_eval_count
+        else:
+            tokens_used = len(prompt) // 4 + len(text) // 4
+        return text, tokens_used
 
     # -- structured --------------------------------------------------------
     def generate_structured(
@@ -173,18 +209,23 @@ class OllamaClient:
         """Generate text, extract JSON, validate against a Pydantic schema.
 
         ``model_cfg`` carries ``model`` (required), ``temperature``,
-        ``seed``, ``timeout_s`` (from ``configs/models.yaml``).
+        ``seed``, ``timeout_s`` and ``max_tokens`` (from
+        ``configs/models.yaml``). ``max_tokens`` is sent to Ollama as
+        ``num_predict`` so the configured output limit is enforced (D27).
 
         On JSON-parse or schema-validation failure the model is asked again
         (up to ``validation_retries`` extra attempts) with a short repair
         instruction appended. Returns the validated instance plus a
-        :class:`GenerationRecord` for provenance.
+        :class:`GenerationRecord` for provenance; the record's
+        ``tokens_used`` accumulates usage across *all* attempts (D10).
         """
         model = str(model_cfg["model"])
         temperature = float(model_cfg.get("temperature", 0.0))
         seed = model_cfg.get("seed", 42)
         seed = int(seed) if seed is not None else None
         timeout_s = float(model_cfg.get("timeout_s", self.timeout_s))
+        max_tokens = model_cfg.get("max_tokens")
+        num_predict = int(max_tokens) if max_tokens else None
         started = datetime.now(timezone.utc)
         t0 = time.monotonic()
         p_hash = prompt_hash(prompt)
@@ -198,15 +239,18 @@ class OllamaClient:
 
         last_err: Exception | None = None
         current = prompt
+        tokens_total = 0
         for attempt in range(validation_retries + 1):
             try:
-                raw = self.generate(
+                raw, usage = self._generate_full(
                     current,
                     model=model,
                     temperature=temperature,
                     seed=seed,
                     timeout_s=timeout_s,
+                    num_predict=num_predict,
                 )
+                tokens_total += usage
             except OllamaBadResponse as exc:
                 # The model replied, but with unusable content (e.g. non-JSON).
                 # Treat as a failed generation attempt, not a transport error.
@@ -224,6 +268,7 @@ class OllamaClient:
                         prompt_hash=p_hash,
                         started_at=started,
                         duration_s=time.monotonic() - t0,
+                        tokens_used=tokens_total,
                     )
                     return instance, record
                 except (ValueError, ValidationError) as exc:

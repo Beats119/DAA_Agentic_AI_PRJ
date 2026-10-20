@@ -59,6 +59,10 @@ class AnalyzerContext:
     run_id: str = "local"
     test_cases: list[TestCase] = field(default_factory=list)
     compile_result: Any | None = None  # CompileResult when available
+    # Per-run execution-budget counter (BudgetTracker), shared with the
+    # generation/oracle phases (D10). Execution-based analyzers must
+    # charge it before each sandbox run; None = no budget wired.
+    budget_tracker: Any | None = None
     _evidence_seq: int = field(default=0, repr=False)
 
     def add_evidence(

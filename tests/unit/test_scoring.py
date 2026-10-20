@@ -121,7 +121,15 @@ def test_inconclusive_never_contributes():
     assert out.grade is None and out.status == "incomplete"
 
 
-def test_skipped_optional_excluded_from_confirmed():
+def test_skipped_optional_excluded_no_evidence_is_incomplete():
+    # UPDATED for scoring policy 1.1 (D6): this test previously pinned the
+    # defective behavior "grade over empty set -> 0.0 with warnings". A
+    # grade computed from ZERO eligible metrics is manufactured evidence:
+    # with no eligible metric and no explicit `zero` policy in play, the
+    # engine must now return grade None + status incomplete + the explicit
+    # reason "no eligible metric evidence" — even when the only metric is
+    # optional. (An eligible metric scoring 0, or the explicit `zero`
+    # policy, still yields a defensible 0.0 — see the property tests.)
     rules = make_rules(
         [("correctness", "correctness", 1.0, False)],
         uncertainty_policy={"required_metric_missing": "incomplete",
@@ -129,10 +137,9 @@ def test_skipped_optional_excluded_from_confirmed():
     )
     out = score([make_result("correctness", "correctness", None, status="skipped")],
                 rules)
-    # nothing eligible: grade over empty set -> 0.0 with warnings (not None:
-    # the metric is optional, so no incomplete)
-    assert out.grade == Decimal("0.0")
-    assert out.status == "completed_with_warnings"
+    assert out.grade is None
+    assert out.status == "incomplete"
+    assert any("no eligible metric evidence" in w for w in out.warnings)
 
 
 def test_all_required_missing_gives_incomplete():

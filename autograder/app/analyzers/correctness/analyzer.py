@@ -129,7 +129,14 @@ def analyze(ctx: AnalyzerContext) -> Any:
     limits = _limits_for(ctx.rules, params)
     per_test: list[dict[str, Any]] = []
     evidence_refs: list[str] = []
-    for tc in trusted:
+    budget_stopped_at: int | None = None
+    for idx, tc in enumerate(trusted):
+        # D10: every sandbox execution is charged to the shared per-run
+        # budget BEFORE it happens. Exhaustion stops execution; tests that
+        # never ran are disclosed, never silently scored as failures.
+        if ctx.budget_tracker is not None and not ctx.budget_tracker.try_consume_exec():
+            budget_stopped_at = idx
+            break
         rec = _run_one(ctx, ctx.binary_path, tc, limits)
         per_test.append(rec)
         evidence_refs.append(
@@ -141,15 +148,49 @@ def analyze(ctx: AnalyzerContext) -> Any:
             )
         )
 
+    if budget_stopped_at is not None and not per_test:
+        # The budget ran out before ANY trusted test could execute: no
+        # correctness evidence exists — inconclusive, not zero.
+        ev_id = ctx.add_evidence(
+            ANALYZER_ID,
+            "exec_budget_exhausted",
+            {"trusted_total": len(trusted), "executed": 0},
+            affects_grade=False,
+        )
+        return build_result(
+            metric=ctx.metric,
+            analyzer_id=ANALYZER_ID,
+            status="inconclusive",
+            evidence_refs=[ev_id],
+            diagnostics={
+                "reason": "execution budget exhausted before any trusted "
+                          "test could run"
+            },
+            warnings=[
+                "execution budget exhausted — no trusted test executed; "
+                "correctness is inconclusive, not zero"
+            ],
+            limitations=[
+                "only tests with oracle status 'trusted' contribute confirmed "
+                "correctness evidence"
+            ],
+        )
+
     exploratory_stats: dict[str, Any] = {}
     if exploratory:
-        exp_results = [_run_one(ctx, ctx.binary_path, tc, limits) for tc in exploratory]
-        exploratory_stats = {
+        exp_results = []
+        for tc in exploratory:
+            if (ctx.budget_tracker is not None
+                    and not ctx.budget_tracker.try_consume_exec()):
+                exploratory_stats["budget_exhausted"] = True
+                break
+            exp_results.append(_run_one(ctx, ctx.binary_path, tc, limits))
+        exploratory_stats.update({
             "ran": len(exp_results),
             "passed": sum(1 for r in exp_results if r["passed"]),
             "note": "exploratory only — excluded from the confirmed score",
             "results": exp_results,
-        }
+        })
 
     passed = sum(1 for r in per_test if r["passed"])
     total = len(per_test)
@@ -164,6 +205,20 @@ def analyze(ctx: AnalyzerContext) -> Any:
             f"(oracle: {r['oracle_provenance']['tier']}/{r['oracle_provenance']['method']})"
         )
 
+    extra_warnings: list[str] = []
+    extra_limitations: list[str] = []
+    if budget_stopped_at is not None:
+        not_run = len(trusted) - len(per_test)
+        extra_warnings.append(
+            f"execution budget exhausted: {not_run} of {len(trusted)} "
+            "trusted test(s) were not executed; the score covers only "
+            "the executed tests"
+        )
+        extra_limitations.append(
+            f"score reflects {len(per_test)} of {len(trusted)} trusted "
+            "tests; the remainder were not executed (execution budget)"
+        )
+
     return build_result(
         metric=ctx.metric,
         analyzer_id=ANALYZER_ID,
@@ -172,15 +227,18 @@ def analyze(ctx: AnalyzerContext) -> Any:
         measurements={
             "passed_trusted": passed,
             "total_trusted": total,
+            "trusted_total": len(trusted),
+            "not_executed_trusted": len(trusted) - total,
             "pass_rate": score,
             "exploratory": exploratory_stats,
         },
         evidence_refs=evidence_refs,
         findings=findings,
+        warnings=extra_warnings,
         limitations=[
             "score reflects only tests with a trusted oracle; "
             f"{len(exploratory)} exploratory test(s) excluded from scoring"
-        ],
+        ] + extra_limitations,
         execution_metadata={
             "per_test_limits": limits.model_dump(),
             "comparison_policy": ctx.rules.comparison_policy.model_dump(),

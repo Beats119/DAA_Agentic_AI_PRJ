@@ -64,6 +64,13 @@ class OracleContext(StrictModel):
     instructor_expected: dict[str, str] = Field(default_factory=dict)
     reference_executor: Any = None  # Callable[[str], str|None]; wired in Phase 4
     gateway: Any = None  # OllamaClient; needed only by Tier-3
+    # Per-run budget counter (BudgetTracker) shared with generation and
+    # correctness: sandbox executions are charged against it (D10).
+    budget_tracker: Any = None
+    # Identity of the rules the instructor evidence came from (D8/D10
+    # provenance): recorded on Tier-1 instructor verdicts when available.
+    rules_version: str | None = None
+    rules_hash: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +94,17 @@ class InstructorExpectedOracle(OracleStrategy):
         key = normalize_ws(test_case.input)
         for raw_in, raw_out in ctx.instructor_expected.items():
             if normalize_ws(raw_in) == key:
+                # Provenance must identify WHERE this evidence came from:
+                # the instructor's grading rules, by version + content hash
+                # when the caller provides them.
+                identity = ""
+                evidence: dict[str, Any] = {"matched_input": raw_in}
+                if ctx.rules_version is not None:
+                    evidence["rules_version"] = ctx.rules_version
+                    identity += f", rules version {ctx.rules_version}"
+                if ctx.rules_hash is not None:
+                    evidence["rules_hash"] = ctx.rules_hash
+                    identity += f", rules hash {ctx.rules_hash}"
                 return OracleVerdict(
                     status="trusted",
                     provenance=ExpectedProvenance(
@@ -94,10 +112,10 @@ class InstructorExpectedOracle(OracleStrategy):
                         method="instructor_provided",
                         detail=(
                             "expected output supplied by the instructor in the "
-                            "grading rules for this exact input"
+                            f"grading rules{identity} for this exact input"
                         ),
                     ),
-                    evidence={"matched_input": raw_in},
+                    evidence=evidence,
                 )
         return OracleVerdict(
             status="inconclusive",
@@ -114,23 +132,142 @@ class ReferenceSolutionOracle(OracleStrategy):
 
     :meth:`prepare` compiles the reference (via a caller-supplied compiler
     callable, or the sandboxed one after :meth:`set_executor`) and validates
-    it against the spec's worked examples. A reference that fails its own
-    validation (doesn't reproduce the spec examples) is NEVER trusted — it
-    is downgraded, per the clarifications.
+    it against the spec's worked examples, tracking coverage (D8). A
+    reference that fails its own validation (doesn't reproduce the spec
+    examples) is NEVER trusted — it is downgraded, per the clarifications.
+    A reference that was never validated against at least one example
+    (e.g. the spec has none) is *capped*: its agreements yield only
+    ``provisional`` verdicts.
 
-    :meth:`assess` runs the reference in the sandbox when an executor is
-    wired via :meth:`set_executor`; otherwise it falls back to
-    ``ctx.reference_executor`` and, when neither exists, honestly returns
+    :meth:`assess` runs the reference (sandboxed when wired, else via
+    ``ctx.reference_executor``) and COMPARES its output with the
+    candidate's expected output (D9) — running successfully is never, by
+    itself, trust. When no execution backend exists it honestly returns
     ``inconclusive`` instead of fabricating results.
     """
 
     name = "reference_solution"
     tier = TIER1
 
+    #: Provenance note used whenever the reference could not be validated
+    #: against any worked example (D8): its verdicts are capped at
+    #: ``provisional`` — agreement with an unvalidated reference is
+    #: supporting evidence, never trust.
+    UNVALIDATED_NOTE = (
+        "reference unvalidated: no specification examples available"
+    )
+
     def __init__(self, reference_source: str | None = None) -> None:
         self.reference_source = reference_source
         self._prepared: dict[str, Any] = {"ready": False, "reason": "not prepared"}
         self._sandbox: dict[str, Any] | None = None
+        self._budget_tracker: Any = None
+        self._exec_budget_exhausted = False
+
+    def set_budget_tracker(self, tracker: Any) -> None:
+        """Share the per-run execution-budget counter (D10).
+
+        Every reference execution (example validation in :meth:`prepare`
+        and per-candidate runs in :meth:`assess`) is charged against it
+        *before* it happens; exhaustion yields ``inconclusive`` verdicts,
+        never a free run.
+        """
+        self._budget_tracker = tracker
+
+    def _tracker(self, ctx: "OracleContext | None" = None) -> Any:
+        if ctx is not None and getattr(ctx, "budget_tracker", None) is not None:
+            return ctx.budget_tracker
+        return self._budget_tracker
+
+    def _comparison_policy(self) -> Any:
+        from ...core.schemas import ComparisonPolicy
+
+        if self._sandbox and self._sandbox["policy"] is not None:
+            return self._sandbox["policy"]
+        return ComparisonPolicy()
+
+    def _verdict_from_comparison(
+        self,
+        *,
+        matched: bool,
+        observed: str,
+        candidate_expected: str,
+        where: str,
+    ) -> OracleVerdict:
+        """Turn a reference-output comparison into a verdict (D8/D9).
+
+        Trust requires BOTH a comparison and a validated reference:
+        - match + validated     -> ``trusted``
+        - match + unvalidated   -> ``provisional`` (agreement with an
+          unvalidated reference is supporting evidence only)
+        - mismatch + validated  -> ``rejected``
+        - mismatch + unvalidated -> ``inconclusive`` (cannot adjudicate
+          which side is wrong)
+        """
+        validated = bool(self._prepared.get("validated"))
+        evidence: dict[str, Any] = {
+            "reference_stdout": observed,
+            "candidate_expected": candidate_expected,
+            "reference_validated": validated,
+            "examples_reproduced": self._prepared.get("examples_reproduced", 0),
+            "examples_total": self._prepared.get("examples_total", 0),
+        }
+        if matched and validated:
+            return OracleVerdict(
+                status="trusted",
+                provenance=ExpectedProvenance(
+                    tier="tier1_reference",
+                    method="reference_solution",
+                    detail=(
+                        "expected output produced by the reference "
+                        f"implementation ({where}), which reproduced "
+                        "the assignment's worked examples"
+                    ),
+                ),
+                evidence=evidence,
+            )
+        if matched:
+            evidence["limitation"] = self.UNVALIDATED_NOTE
+            return OracleVerdict(
+                status="provisional",
+                provenance=ExpectedProvenance(
+                    tier="tier1_reference",
+                    method="reference_solution",
+                    detail=(
+                        f"{self.UNVALIDATED_NOTE}; the reference's output "
+                        "agrees with the candidate, which is supporting "
+                        "evidence only — not trust"
+                    ),
+                ),
+                evidence=evidence,
+            )
+        if validated:
+            return OracleVerdict(
+                status="rejected",
+                provenance=ExpectedProvenance(
+                    tier="tier1_reference",
+                    method="reference_solution",
+                    detail=(
+                        "candidate expected output contradicts the "
+                        f"validated reference implementation ({where})"
+                    ),
+                ),
+                evidence=evidence,
+            )
+        evidence["limitation"] = self.UNVALIDATED_NOTE
+        return OracleVerdict(
+            status="inconclusive",
+            provenance=ExpectedProvenance(
+                tier="tier1_reference",
+                method="reference_solution",
+                detail=(
+                    "candidate disagrees with the reference, but the "
+                    f"reference is unvalidated ({self.UNVALIDATED_NOTE}); "
+                    "cannot adjudicate which side is wrong"
+                ),
+            ),
+            evidence=evidence,
+        )
 
     # ------------------------------------------------------------------ #
     def set_executor(
@@ -177,8 +314,18 @@ class ReferenceSolutionOracle(OracleStrategy):
         }
 
     def _sandbox_run(self, binary: str, stdin_text: str) -> str | None:
-        """Adapt the sandbox executor to run_reference's shape."""
+        """Adapt the sandbox executor to run_reference's shape.
+
+        Charges the shared execution budget *before* running (D10). On
+        exhaustion it sets ``_exec_budget_exhausted`` and returns None —
+        callers must check the flag to distinguish "budget stopped us"
+        from "the reference crashed".
+        """
         assert self._sandbox is not None
+        tracker = self._tracker()
+        if tracker is not None and not tracker.try_consume_exec():
+            self._exec_budget_exhausted = True
+            return None
         result = self._sandbox["executor"].run(
             [binary], stdin_text, self._sandbox["limits"]
         )
@@ -198,20 +345,35 @@ class ReferenceSolutionOracle(OracleStrategy):
         ``compile(source)`` -> {"ok": bool, "binary": path|None, "diagnostics": str}.
         ``run_reference(binary, stdin)`` -> stdout or None; when available the
         spec's worked examples are actually executed — any mismatch downgrades
-        the reference (never trusted). When absent, example-validation is
-        deferred and recorded honestly.
+        the reference (never trusted).
+
+        Validation coverage is tracked explicitly (D8): how many examples
+        exist, how many were run, how many the reference reproduced.
+        ``validated`` is True only when at least one example was reproduced
+        and none was contradicted. A reference that merely compiles — e.g.
+        because the spec has NO worked examples — is ``ready`` but NOT
+        ``validated``, and :meth:`assess` caps its verdicts at
+        ``provisional``.
         """
         from ...core.comparison import compare_output
-        from ...core.schemas import ComparisonPolicy
 
-        policy = (
-            self._sandbox["policy"]
-            if self._sandbox and self._sandbox["policy"] is not None
-            else ComparisonPolicy()
-        )
+        policy = self._comparison_policy()
         if self._sandbox is not None:
             compile = self._sandbox_compile  # type: ignore[assignment]
             run_reference = self._sandbox_run
+        elif run_reference is not None:
+            # Caller-supplied runner: charge the same execution budget
+            # (the sandbox adapter charges it internally).
+            _raw_run = run_reference
+
+            def run_reference(binary: str, stdin_text: str, _raw=_raw_run):  # type: ignore[misc]
+                tracker = self._tracker()
+                if tracker is not None and not tracker.try_consume_exec():
+                    self._exec_budget_exhausted = True
+                    return None
+                return _raw(binary, stdin_text)
+
+        self._exec_budget_exhausted = False
         if not self.reference_source:
             self._prepared = {"ready": False, "reason": "no reference solution provided"}
             return self._prepared
@@ -224,18 +386,25 @@ class ReferenceSolutionOracle(OracleStrategy):
             }
             return self._prepared
         binary = result.get("binary")
-        example_report: Any = (
-            "deferred: no executor to run examples" if run_reference is None else None
-        )
+
+        examples_total = len(spec.examples)
+        examples_run = 0
+        examples_reproduced = 0
+        failures: list[dict[str, Any]] = []
+        budget_stopped = False
         if run_reference is not None and spec.examples:
-            failures: list[dict[str, Any]] = []
             for ex in spec.examples:
                 try:
                     observed = run_reference(binary, ex.input)
                 except Exception as exc:
-                    observed = None
                     failures.append({"input": ex.input, "reason": f"run failed: {exc}"})
                     continue
+                if self._exec_budget_exhausted:
+                    # The budget stopped validation — NOT a reference
+                    # failure. Coverage so far stands.
+                    budget_stopped = True
+                    break
+                examples_run += 1
                 if observed is None or not compare_output(observed, ex.output, policy):
                     failures.append(
                         {
@@ -245,24 +414,52 @@ class ReferenceSolutionOracle(OracleStrategy):
                             "page": ex.page,
                         }
                     )
-            example_report = {
-                "examples": len(spec.examples),
-                "failed": failures,
+                else:
+                    examples_reproduced += 1
+        validated = examples_reproduced >= 1 and not failures
+        if run_reference is None:
+            validation_note = "deferred: no executor to run examples"
+        elif examples_total == 0:
+            validation_note = "no spec examples to validate against"
+        elif budget_stopped:
+            validation_note = (
+                "example validation stopped early: execution budget "
+                f"exhausted after {examples_run}/{examples_total} examples"
+            )
+        else:
+            validation_note = "all spec examples reproduced"
+        example_report = {
+            "examples": examples_total,
+            "examples_run": examples_run,
+            "examples_reproduced": examples_reproduced,
+            "failed": failures,
+            "validated": validated,
+            "note": validation_note,
+        }
+        if failures:
+            # The reference is not authoritative if it cannot reproduce
+            # the assignment's own worked examples — downgrade, loudly.
+            self._prepared = {
+                "ready": False,
+                "reason": "reference failed example validation",
+                "example_validation": example_report,
+                "examples_total": examples_total,
+                "examples_run": examples_run,
+                "examples_reproduced": examples_reproduced,
+                "examples_failed": len(failures),
+                "validated": False,
             }
-            if failures:
-                # The reference is not authoritative if it cannot reproduce
-                # the assignment's own worked examples — downgrade, loudly.
-                self._prepared = {
-                    "ready": False,
-                    "reason": "reference failed example validation",
-                    "example_validation": example_report,
-                }
-                return self._prepared
+            return self._prepared
         self._prepared = {
             "ready": True,
             "binary": binary,
-            "reason": "compiled",
-            "example_validation": example_report or "no spec examples to validate against",
+            "reason": "compiled" if validated else "compiled (unvalidated)",
+            "example_validation": example_report,
+            "examples_total": examples_total,
+            "examples_run": examples_run,
+            "examples_reproduced": examples_reproduced,
+            "examples_failed": 0,
+            "validated": validated,
         }
         return self._prepared
 
@@ -284,11 +481,16 @@ class ReferenceSolutionOracle(OracleStrategy):
                 f"reference unavailable: {self._prepared.get('reason')}"
             )
         if self._sandbox is not None:
-            return self._assess_sandboxed(test_case)
+            return self._assess_sandboxed(test_case, ctx)
         executor = ctx.reference_executor
         if executor is None:
             # Honest, not mocked: no execution backend wired.
             return _inconclusive("no execution backend wired for the reference")
+        tracker = self._tracker(ctx)
+        if tracker is not None and not tracker.try_consume_exec():
+            return _inconclusive(
+                "execution budget exhausted; reference not run for this input"
+            )
         try:
             observed = executor(test_case.input)
         except Exception as exc:
@@ -298,28 +500,35 @@ class ReferenceSolutionOracle(OracleStrategy):
                 "reference crashed/timed out on this input; "
                 "expected output cannot be established"
             )
-        return OracleVerdict(
-            status="trusted",
-            provenance=ExpectedProvenance(
-                tier="tier1_reference",
-                method="reference_solution",
-                detail="expected output produced by the validated reference "
-                "implementation",
-            ),
-            evidence={"reference_stdout": observed},
+        # D9: the reference's output must be COMPARED with the candidate's
+        # expected output. Merely running successfully is not trust.
+        from ...core.comparison import compare_output
+
+        matched = compare_output(
+            observed, test_case.expected.value, self._comparison_policy()
+        )
+        return self._verdict_from_comparison(
+            matched=matched,
+            observed=observed,
+            candidate_expected=test_case.expected.value,
+            where="reference executor",
         )
 
     # ------------------------------------------------------------------ #
-    def _assess_sandboxed(self, test_case: TestCase) -> OracleVerdict:
+    def _assess_sandboxed(
+        self, test_case: TestCase, ctx: OracleContext | None = None
+    ) -> OracleVerdict:
         """Run the reference in the sandbox for one test input.
 
-        Outcomes: ``trusted`` (output matches the candidate's expected),
-        ``rejected`` (deterministic mismatch, with both outputs recorded),
-        ``inconclusive`` (reference failed to compile or run — recorded, never
-        silently trusted).
+        Outcomes: ``trusted`` (output matches the candidate's expected AND
+        the reference was validated against spec examples),
+        ``provisional`` (match against an *unvalidated* reference, D8),
+        ``rejected`` (deterministic mismatch against a validated
+        reference, with both outputs recorded), ``inconclusive``
+        (reference failed to compile/run, or the execution budget is
+        exhausted — recorded, never silently trusted).
         """
         from ...core.comparison import compare_output
-        from ...core.schemas import ComparisonPolicy
 
         def _inconclusive(reason: str, evidence: dict[str, Any] | None = None) -> OracleVerdict:
             return OracleVerdict(
@@ -345,6 +554,11 @@ class ReferenceSolutionOracle(OracleStrategy):
             return _inconclusive(
                 f"reference failed to compile in the sandbox: {sb['compile_error'][:500]}"
             )
+        tracker = self._tracker(ctx)
+        if tracker is not None and not tracker.try_consume_exec():
+            return _inconclusive(
+                "execution budget exhausted; reference not run for this input"
+            )
         try:
             result = sb["executor"].run([sb["binary"]], test_case.input, sb["limits"])
         except Exception as exc:
@@ -356,30 +570,13 @@ class ReferenceSolutionOracle(OracleStrategy):
                 f"exit={result.exit_code}); expected output cannot be established",
                 evidence={"stderr_tail": result.stderr[-500:]},
             )
-        policy = sb["policy"] or ComparisonPolicy()
-        if compare_output(result.stdout, test_case.expected.value, policy):
-            return OracleVerdict(
-                status="trusted",
-                provenance=ExpectedProvenance(
-                    tier="tier1_reference",
-                    method="reference_solution",
-                    detail="expected output produced by the validated reference "
-                    "implementation in the sandbox",
-                ),
-                evidence={"reference_stdout": result.stdout},
-            )
-        return OracleVerdict(
-            status="rejected",
-            provenance=ExpectedProvenance(
-                tier="tier1_reference",
-                method="reference_solution",
-                detail="candidate expected output contradicts the sandboxed "
-                "reference implementation",
-            ),
-            evidence={
-                "reference_stdout": result.stdout,
-                "candidate_expected": test_case.expected.value,
-            },
+        policy = sb["policy"] or self._comparison_policy()
+        matched = compare_output(result.stdout, test_case.expected.value, policy)
+        return self._verdict_from_comparison(
+            matched=matched,
+            observed=result.stdout,
+            candidate_expected=test_case.expected.value,
+            where="sandbox",
         )
 
 

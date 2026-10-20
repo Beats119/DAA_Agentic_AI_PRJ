@@ -2,7 +2,10 @@
 
 Fresh candidates every call — no caching, no memoization. The loop is
 bounded by the rules' test-generation policy (rounds, candidate count,
-token/exec budgets); it cannot run forever.
+token/exec budgets); it cannot run forever. Budgets are *enforced* (D10):
+token usage from every generation record is accumulated into a shared
+:class:`BudgetTracker`, and no new round starts once the token budget is
+exhausted — exhaustion is reported in the suite's ``limitations``.
 
 Pipeline per round:
   1. LLM proposes candidates (structured JSON -> TestCandidate).
@@ -10,7 +13,7 @@ Pipeline per round:
      duplicates).
   3. If requirements remain uncovered and budget remains, one refinement
      round targets them (with quarantine feedback).
-  4. Stop at max_rounds, max_candidates, or full coverage.
+  4. Stop at max_rounds, max_candidates, token budget, or full coverage.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from ..validation.cases import validate_candidate
 from .budgets import (
     MAX_CASES_PER_ROUND,
     MIN_CASES_PER_ROUND,
+    BudgetTracker,
     effective_budgets,
 )
 
@@ -167,6 +171,8 @@ def generate_test_suite(
     spec: Specification,
     rules: RuleSet,
     client: OllamaClient,
+    *,
+    budget_tracker: BudgetTracker | None = None,
 ) -> dict[str, Any]:
     """Full bounded generation pipeline.
 
@@ -179,17 +185,30 @@ def generate_test_suite(
           "rounds_used": int,
           "budgets": {...},
           "uncovered_requirements": [...],
+          "limitations": [...],            # e.g. "token budget exhausted"
         }
+
+    ``budget_tracker`` is the per-run counter shared with the oracle and
+    correctness phases; when omitted, a fresh one is built from the rules.
+    Token usage from each generation record is accumulated into it, and
+    the loop stops *before* starting a round that the (already exhausted)
+    budget cannot pay for.
 
     Never raises for "no usable candidates" — that is a legitimate outcome
     reported honestly (the orchestrator then marks missing evidence).
     """
     budgets = effective_budgets(rules.test_generation)
+    tracker = budget_tracker or BudgetTracker.from_policy(rules.test_generation)
     quarantined: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
+    limitations: list[str] = []
     accepted: list[TestCase] = []
     seen_ids: set[str] = set()
     seen_inputs: set[str] = set()
+
+    def _account_tokens(recs: list[dict[str, Any]]) -> None:
+        for rec in recs:
+            tracker.add_tokens(int(rec.get("tokens_used", 0) or 0))
 
     def _admit(cands: list[TestCandidate]) -> None:
         for cand in cands:
@@ -218,13 +237,40 @@ def generate_test_suite(
                 break
 
     rounds_used = 0
-    initial, recs = generate_candidates(spec, rules, client)
-    records.extend(recs)
-    rounds_used += 1
-    _admit(initial)
+    if tracker.tokens_exhausted():
+        # A shared tracker can arrive pre-exhausted (e.g. earlier phases
+        # consumed the budget): do not start a round we cannot pay for.
+        limitations.append(
+            "token budget exhausted before generation started "
+            f"({tracker.tokens_used}/{budgets['token_budget']} tokens used)"
+        )
+    else:
+        initial, recs = generate_candidates(spec, rules, client)
+        records.extend(recs)
+        _account_tokens(recs)
+        rounds_used += 1
+        _admit(initial)
+        if tracker.tokens_used > budgets["token_budget"]:
+            limitations.append(
+                "token budget exhausted "
+                f"({tracker.tokens_used}/{budgets['token_budget']} tokens used); "
+                "no further generation rounds"
+            )
 
     next_num = len(seen_ids) + 1
-    while rounds_used < budgets["max_rounds"] and len(accepted) < budgets["max_candidates"]:
+    while (
+        rounds_used < budgets["max_rounds"]
+        and len(accepted) < budgets["max_candidates"]
+        and rounds_used > 0
+    ):
+        if tracker.tokens_exhausted():
+            if not any("token budget exhausted" in lim for lim in limitations):
+                limitations.append(
+                    "token budget exhausted "
+                    f"({tracker.tokens_used}/{budgets['token_budget']} tokens used); "
+                    "refinement stopped"
+                )
+            break
         covered = {r for tc in accepted for r in tc.requirement_refs}
         uncovered = [r.id for r in spec.requirements if r.id not in covered]
         if not uncovered and quarantined_reason_free(quarantined):
@@ -237,10 +283,18 @@ def generate_test_suite(
             next_id=next_num,
         )
         records.extend(recs)
+        _account_tokens(recs)
         rounds_used += 1
         before = len(accepted)
         _admit(refined)
         next_num = len(seen_ids) + 1
+        if tracker.tokens_used > budgets["token_budget"]:
+            limitations.append(
+                "token budget exhausted "
+                f"({tracker.tokens_used}/{budgets['token_budget']} tokens used); "
+                "no further generation rounds"
+            )
+            break
         if len(accepted) == before:
             break  # refinement produced nothing usable; stop, don't spin
 
@@ -252,6 +306,8 @@ def generate_test_suite(
         "rounds_used": rounds_used,
         "budgets": budgets,
         "uncovered_requirements": [r.id for r in spec.requirements if r.id not in covered],
+        "limitations": limitations,
+        "tokens_used": tracker.tokens_used,
     }
 
 
