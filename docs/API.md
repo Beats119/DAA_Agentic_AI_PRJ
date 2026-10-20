@@ -24,10 +24,25 @@ Liveness + dependency honesty. Returns:
  "ollama": {"reachable": false, "models": [], "recommended": [],
             "error": "cannot reach Ollama at ... (Connection refused)"},
  "sandbox": {"resource_limits": true, "network_namespace": true,
-             "landlock_abi": 1, "compiler": "/usr/bin/gcc", ...},
- "versions": {"scoring_policy": "1.0", "sandbox": "sandbox-1.0",
+             "seccomp": true, "landlock_abi": 8, "compiler": "/usr/bin/gcc", ...},
+ "versions": {"scoring_policy": "1.1", "sandbox": "sandbox-2.0",
               "python": "3.12.3", "app": "0.1.0"}}
 ```
+
+(Sandbox values are probed live on the host — `landlock_abi` and
+`compiler` above are this machine's measurements, not constants.
+`seccomp: true` means the real restrictive filter was installed in a
+probe child and a denied syscall returned EPERM, not merely that the
+mechanism exists.)
+
+> **Upload limits are enforced incrementally.** An ASGI guard counts
+> body bytes as they stream in and rejects oversize uploads with 413
+> before the body is fully received; at most 4 uploads stream
+> concurrently (excess → 429 `{"error": {"code": "too_many_uploads"}}`).
+> Handlers then stream the file to disk in 64 KB chunks, enforcing the
+> exact per-file cap. Unhandled server errors return 500
+> `{"error": {"code": "internal_error", "message": "internal server error"}}`
+> — no tracebacks or server paths are ever exposed.
 
 ### `POST /api/assignments` → 201
 Multipart `file` (PDF or plain text, ≤ 20 MB). Returns
@@ -44,7 +59,9 @@ List of rules `{id, version, hash, metrics:[names], ...}` (seeded from
 
 ### `POST /api/rules` → 201
 Multipart `file` (JSON/YAML, ≤ 512 KB). The file is **validated** before
-storage; returns `{id, version, hash, metrics}`. 422 on invalid rules.
+storage and keeps its uploaded format's extension (`.json`/`.yaml`), so
+uploaded YAML rules can be listed and used by evaluations; returns
+`{id, version, hash, metrics}`. 422 on invalid rules.
 
 ### `POST /api/evaluations` → 202
 Body: `{"assignment_id": "...", "submission_id": "...", "rules_id": "..."}`.

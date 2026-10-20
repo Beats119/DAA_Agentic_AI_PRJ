@@ -1,39 +1,61 @@
 # Acceptance Checklist
 
-Walked against `docs/PLAN.md` §6 (22 items), 2026-10-20, this VM
-(Python 3.12.3, gcc 13.3, **no Ollama**, no cppcheck/valgrind/lizard/perf).
+Walked against `docs/PLAN.md` §6 (22 items). Re-walked 2026-10-20 after the
+audit-remediation phases (B–N), on this VM: Python 3.12.3, gcc 13.3,
+kernel 7.0, Landlock ABI 8, running as root, **no Ollama**, no
+cppcheck/valgrind/lizard/perf, cgroup v2 not delegated.
 
-**Tally: 20 PASS, 2 PASS-WITH-NOTE, 0 FAIL.**
+## Status key
 
-| # | Criterion | Verdict | Evidence |
-|---|-----------|---------|----------|
-| 1 | App starts locally with a usable web UI | **PASS** | `python -m autograder.app.api.main --port 8931`; `/health` returns honest Ollama+sandbox+version status; pages `/`, `/new`, `/rules`, `/operations` all 200. |
-| 2 | No external inference services; no API keys | **PASS** | `OllamaClient` rejects non-loopback URLs at construction (`tests/integration/test_ollama_gateway.py::test_loopback_enforcement`); no `Authorization` header exists anywhere in `autograder/`; no key config in `.env.example`. |
-| 3 | Ollama + model availability checked at startup and operations page | **PASS** | `/health` reports `ollama.reachable/models/recommended/error` (verified live: "Connection refused" surfaced, not hidden); `/operations` page renders the same; `ensure_model()` names the exact `ollama pull <model>` command when missing. |
-| 4 | Rules editable without code changes | **PASS** | `POST /api/rules` validates and stores versioned rules; `rules/` page lists them; `examples/rules/add.json` demonstrates all sections; invalid rules rejected with 422 (`test_api.py`). |
-| 5 | Fresh, real LLM test generation on every evaluation | **PASS-WITH-NOTE** | Workflow calls `generate_test_suite()` every run; no test/grade cache exists in the codebase (verified by inspection). *Note: real-LLM generation quality not measured here — no Ollama on this VM; integration tests prove the wiring with a labeled mock.* |
-| 6 | Generated tests validated before execution | **PASS** | Pipeline order in `workflow.py`: `validate_candidate` → oracle assessment → compile → run only `trusted` tests. `test_stats.validated/executed` recorded in every report. |
-| 7 | Untrusted C runs in verified isolation | **PASS** | `tests/security/`: 19 tests with real hostile binaries — timeout+killpg tree kill, memory bomb (RLIMIT_AS), output flood cap, fork bomb (RLIMIT_NPROC), fs escape blocked (Landlock), segfault recorded, fail-closed on degraded host. |
-| 8 | Timeouts / resource exhaustion handled | **PASS** | Same suite; `ExecutionResult.timed_out`, signals, and truncation flags recorded per run, never a hang. |
-| 9 | Analyzer results use structured schemas + evidence references | **PASS** | `AnalyzerResult` (Pydantic, `extra="forbid"`) with `evidence_refs`, `findings`, `execution_metadata`; evidence registry append-only, immutable after finalize (`test_persistence.py`). |
-| 10 | Score computed by deterministic software, never chosen by the model | **PASS** | `autograder/app/scoring/engine.py` is a pure function with no gateway dependency; feedback module cannot touch grade/evidence (enforced by code + test). |
-| 11 | Identical validated evidence + rules → identical score | **PASS** | Variance runs: 5/5 identical grades (95.3), deviation 0.00 (`docs/VARIANCE.md`). |
-| 12 | Unverified expected outputs never become confirmed failures | **PASS** | Tier-3 agreement capped at `provisional` by code assertion (`strategies.py`) + dedicated test (`test_oracle_tier3_agreement_never_trusted`); only `trusted` tests feed the correctness score. |
-| 13 | Missing required analyzers can never silently score full marks | **PASS** | `uncertainty_policy.required_metric_missing: "incomplete"` → grade `None`, status `incomplete` (demonstrated live in `docs/demo/`); optional metrics renormalize only when policy says so, always recorded. |
-| 14 | JSON and HTML reports reconcile with the computed score | **PASS** | `validate_report()` asserts Σ contributions == grade within 0.05 + per-metric `100·w·s` + policy version; `/api/evaluations/{id}/report` and `/report.html` serve the same validated report (`test_api.py`). |
-| 15 | Findings traceable to evidence | **PASS** | Every report carries `evidence_coverage`, per-finding evidence refs, tool/model/prompt versions, and `reproduction` info (input hashes, run id). |
-| 16 | Similarity never claims cheating/authorship proof | **PASS** | Module docstring + report language: "flag for human review"; a unit test asserts the report text contains no authorship claim. |
-| 17 | Repeated-run stability measured and reported | **PASS-WITH-NOTE** | Measured: max deviation 0.00 ≤ 7.0 (`docs/VARIANCE.md`). *Note: measured with deterministic fake LLM; real-LLM variance measurement belongs on the Ollama machine.* |
-| 18 | Tests run with accurate pass/fail/skip reporting | **PASS** | Full suite: **203 passed, 4 skipped, 0 failed**; skips are exactly the 4 real-Ollama tests with explicit reasons (never faked). |
-| 19 | Real end-to-end demonstration documented | **PASS** | `docs/DEMO.md` + real `report_*.json` from the CLI; degraded no-LLM path stated plainly; full pipeline proven by integration e2e tests + variance runs. |
-| 20 | Security boundary + missing capabilities documented | **PASS** | `docs/SANDBOX.md`: enforcement table, capability probe results, fail-closed rules, residual risks. |
-| 21 | Setup instructions, example rules, final-report material | **PASS** | `docs/INSTALL.md`, `docs/OLLAMA.md`, `examples/rules/add.json`, `docs/USE_CASES.md`, `docs/LIMITATIONS.md`, `docs/TIMELINE.md`. |
-| 22 | Nothing mocked presented as implemented | **PASS** | Mocks exist only under `tests/` (labeled `Mock`/`Fake`, test-only); production `ReferenceSolutionOracle` returns honest `inconclusive` until wired; degraded paths report `unsupported`/`inconclusive`/`skipped`, never zeros. |
+- **VERIFIED** — exercised by the cited test/evidence on this machine.
+- **IMPLEMENTED–NOT VERIFIED IN TARGET ENV** — code exists and is
+  unit/mock-tested, but the target-environment behavior has not been run.
+- **MOCK-TESTED ONLY** — proven only against the labeled test doubles
+  (`FakeGateway` / mock Ollama server under `tests/`).
+- **PARTIAL** — part of the criterion holds; the gap is stated.
+- **BLOCKED–ENVIRONMENT** — cannot be exercised on this machine at all;
+  the exact unblock step is stated.
+- **NOT IMPLEMENTED** — not built.
 
-## Fixed during this phase
+No criterion is marked VERIFIED without an evidence pointer.
 
-- `tests/integration/test_ollama_gateway.py::test_unreachable_is_explicit`
-  hung the suite: `server.shutdown()` stops the serve loop but leaves the
-  listening socket open, so the client connection was accepted and stalled
-  until the 120 s default timeout. Fixed with `server.server_close()` —
-  the test now finishes in milliseconds (file: 6.7 s total).
+**Tally: 16 VERIFIED · 3 PARTIAL · 1 MOCK-TESTED ONLY ·
+2 BLOCKED–ENVIRONMENT · 0 NOT IMPLEMENTED.**
+
+| # | Criterion | Status | Evidence / gap |
+|---|-----------|--------|----------------|
+| 1 | App starts locally with a usable web UI | **VERIFIED** | `tests/integration/test_api.py` (pages `/`, `/new`, `/rules`, `/operations`, run detail — all exercised via TestClient); `tests/integration/test_ui_honesty.py` (empty states, incomplete runs show no grade, confirmed 0.0 shows as 0.0). Booted live during remediation; `/health` returns honest Ollama + sandbox + version status. |
+| 2 | No external inference services; no API keys | **VERIFIED** | `OllamaClient` rejects non-loopback URLs at construction (`tests/integration/test_ollama_gateway.py::test_loopback_enforcement`, no-auth-header test in the same file); no `Authorization` header or API-key concept anywhere in `autograder/` (grep-verified in the Phase A audit and unchanged since). |
+| 3 | Ollama + model availability checked at startup and operations page | **PARTIAL** | Verified: unreachable server is surfaced honestly, not hidden (`/health` reports the connection error; `/operations` renders live probe output incl. the mandatory sandbox policy; `tests/integration/test_ollama_gateway.py` failure-path tests). **Missing:** the reachable-server / model-present / model-missing paths have never run against a real Ollama — same environment gap as #5/#17; unblock via the procedure in `docs/OLLAMA.md`. |
+| 4 | Rules editable without code changes | **VERIFIED** | `POST /api/rules` validates and stores versioned rules (JSON **and** YAML end-to-end since Phase F — uploaded YAML keeps its extension, lists, and drives evaluations); invalid rules rejected with 422; `examples/rules/add.json` demonstrates all sections. Evidence: `tests/integration/test_api.py`, `tests/integration/test_api_hardening.py`. |
+| 5 | Fresh, real LLM test generation on every evaluation | **BLOCKED–ENVIRONMENT** | The freshness mechanism is proven: every run calls generation anew, no test/grade cache exists, and run 2 provably uses run 2's own LLM response (`tests/integration/test_fresh_generation.py::test_each_run_generates_fresh_tests`, `tests/integration/test_generation_oracle.py`) — but only against the labeled FakeGateway. **Real** generation by a real model has never run here (no Ollama on this VM). **Unblock:** on the WSL machine, run `pytest tests/integration/test_ollama_real.py -v` (see `docs/OLLAMA.md`). |
+| 6 | Generated tests validated before execution | **VERIFIED** | Pipeline order in `workflow.py`: deterministic candidate validation → tiered oracle assessment → compile → only `trusted` tests executed; `test_stats.validated/executed` recorded in every report. Evidence: `tests/integration/test_generation_oracle.py`, `tests/integration/test_orchestration.py`. (Validation itself is deterministic code; only candidate *supply* in these tests comes from the mock gateway.) |
+| 7 | Untrusted C runs in verified isolation | **VERIFIED** | Sandbox 2.0: dedicated launcher process (no `preexec_fn`), mandatory network namespace, narrow Landlock allowlist (run dir + system lib dirs + `/dev/null` only), restrictive seccomp profiles, privilege drop to uid 65534 when root-run. Evidence: `tests/security/` — 32 tests with real hostile binaries, incl. `test_read_isolation.py` (`/etc/shadow`, SSH keys, planted secrets all denied), `test_symlink_escape.py`, `test_identity.py`, `test_network_mandatory.py`, `test_seccomp.py` (socket/ptrace → EPERM), `test_policy_fail_closed.py`, `test_fs_escape.py`, `test_timeout.py`. **Caveat:** cgroup v2 is not delegated on this VM, so resource *accounting* is rlimit-based (containment itself is enforced and tested) — see `docs/LIMITATIONS.md`. |
+| 8 | Timeouts / resource exhaustion handled | **VERIFIED** | Per-run sandbox limits (wall/CPU/memory/output/process count, killpg tree kill): `tests/security/test_timeout.py`, `test_memory.py`, `test_output_flood.py`, `test_forkbomb.py`. Analyzer-level: subprocess-per-analyzer hard deadlines + overall evaluation timeout (default 1800 s) — `tests/integration/test_coordinator_deadlines.py` (hanging/crashing analyzers, orphan-process kill). |
+| 9 | Analyzer results use structured schemas + evidence references | **VERIFIED** | `AnalyzerResult` (Pydantic, `extra="forbid"`) with `evidence_refs`, `findings`, `execution_metadata`; evidence registry append-only, immutable after finalize, blob hashes verified against persisted bytes. Evidence: `tests/unit/test_persistence.py`, `tests/unit/test_evidence_blob.py`, `tests/unit/test_analyzers_base.py` (honesty guard: non-completed statuses cannot carry scores). |
+| 10 | Score computed by deterministic software, never chosen by the model | **VERIFIED** | `autograder/app/scoring/engine.py` (policy **1.1**) is a pure function with no gateway dependency; the feedback path cannot touch grade/evidence (asserted by `tests/integration/test_orchestration.py`); the optional LLM feedback check can only trigger bounded regeneration, never edit text or scores (`tests/unit/test_feedback_llm_check.py`). |
+| 11 | Identical validated evidence + rules → identical score | **VERIFIED** | Scoring determinism is a pure-function property: `tests/unit/test_scoring.py`, `tests/unit/test_scoring_properties.py` (parameterized weight/missing-evidence/rounding sweeps), plus 5/5 identical end-to-end grades (95.3, deviation 0.00) in `docs/VARIANCE.md`. |
+| 12 | Unverified expected outputs never become confirmed failures | **VERIFIED** | Tier-3 agreement capped at `provisional` by code assertion + `test_oracle_tier3_agreement_never_trusted`; a reference solution with no spec examples to validate against is capped at `provisional` (Phase D); only `trusted` tests feed the correctness score. Evidence: `tests/integration/test_generation_oracle.py`, `tests/security/test_oracle_sandbox.py`. |
+| 13 | Missing required analyzers can never silently score full marks | **VERIFIED** | `uncertainty_policy.required_metric_missing: "incomplete"` → grade `None`, status `incomplete` (demonstrated live in `docs/DEMO.md`); zero eligible evidence of any kind → grade `None` under scoring policy 1.1 (the pre-1.1 manufactured 0.0 is gone); optional metrics renormalize only per policy, with configured **and** effective weights both shown. Evidence: `tests/unit/test_scoring_properties.py`, `tests/unit/test_report.py`. |
+| 14 | JSON and HTML reports reconcile with the computed score | **VERIFIED** | `validate_report()` asserts Σ contributions == grade within 0.05, per-metric `100·w·s`, configured weights match the rules, and policy version == 1.1; JSON↔HTML identity (grade, status, per-metric configured/effective weights, scores, contributions) asserted by `tests/integration/test_ui_honesty.py`. Both formats serve the same validated report (`tests/integration/test_api.py`). |
+| 15 | Findings traceable to evidence | **VERIFIED** | Every report carries `evidence_coverage`, per-finding evidence refs, tool/model/prompt versions, and `reproduction` info (input hashes, run id); feedback claims are deterministically verified against recorded evidence — including cited source-line ranges and metric-score claims. Evidence: `tests/unit/test_feedback_verification.py`, `tests/integration/test_orchestration.py`. |
+| 16 | Similarity never claims cheating/authorship proof | **VERIFIED** | Report and UI language is "flag for human review" only; `tests/unit/test_analyzers_similarity.py` asserts the report text contains no authorship claim; empty corpus → `skipped`/`None`, never a manufactured score. |
+| 17 | Repeated-run stability measured and reported | **BLOCKED–ENVIRONMENT** | Deterministic-path measurement: max deviation **0.00** ≤ 7.0 across 5 runs — but with the deterministic FakeGateway, which proves the scoring layer, not the model (`docs/VARIANCE.md`). **Real-model variance is UNVERIFIED**: LLM evidence can move between runs and has never been measured against the ≤ 7.0 bar. **Unblock:** on the WSL machine with Ollama + llama3.1, run the 5-run real-gateway procedure in `docs/OLLAMA.md` and record the result in `docs/VARIANCE.md`. |
+| 18 | Tests run with accurate pass/fail/skip reporting | **VERIFIED** | Full suite (2026-10-20, post-remediation): **348 passed, 4 skipped, 0 failed** across `tests/unit tests/integration tests/security`; the 4 skips are exactly the real-Ollama tests, skipping with explicit "not reachable" reasons. Scenario-by-scenario map: `docs/TESTING.md`. CI (`.github/workflows/ci.yml`) runs the deterministic suite, the security suite as its own job, and lint — but see #21 note: Actions execution itself is not yet observed. |
+| 19 | Real end-to-end demonstration documented | **PARTIAL** | The degraded no-LLM demo is real and reproducible: `docs/DEMO.md` commands were re-run verbatim post-remediation (2026-10-20) and reproduce the documented outcomes exactly (both runs `incomplete`, grade `None`, 16 uncertainty entries, 7 limitations); full pipeline with a mock gateway is proven end-to-end by `tests/integration/test_orchestration.py`. **Missing:** a full-LLM end-to-end demo on a machine with Ollama — same unblock as #5. |
+| 20 | Security boundary + missing capabilities documented | **VERIFIED** | `docs/SANDBOX.md` (sandbox-2.0 design: launcher, mandatory policy, Landlock allowlist, seccomp profiles, identity, residual risks incl. the rlimits-vs-cgroups note); `docs/LIMITATIONS.md` (concrete scenarios + mitigations, incl. cgroup/accounting, x86_64-only seccomp, root-only identity drop); capability probe output is rendered live on `/operations` and in `/health`. |
+| 21 | Setup instructions, example rules, final-report material | **PARTIAL** | Present and verified locally: `docs/INSTALL.md` documents the portable-lock install sequence, **proven** in a fresh venv (unit suite 236 passed installed purely from `requirements.lock`); `docs/OLLAMA.md`, `examples/rules/add.json`, `docs/USE_CASES.md`, `docs/LIMITATIONS.md`, `docs/TIMELINE.md`. **Missing:** the GitHub Actions workflow's first real run has not been observed (no runner available here), and the install has not been exercised on the WSL target machine. |
+| 22 | Nothing mocked presented as implemented | **MOCK-TESTED ONLY** | The honesty machinery itself is verified: mocks exist only under `tests/` (labeled `Mock`/`Fake`, test-only); degraded paths report `unsupported`/`inconclusive`/`skipped`, never zeros; the production `ReferenceSolutionOracle` returns honest `inconclusive` until wired. But every LLM-driven behavior behind this claim (spec extraction, generation, readability, feedback drafting) has only ever run against test doubles on this machine — the claim graduates to VERIFIED only when #5/#17 unblock on the WSL machine. |
+
+## What would change these statuses
+
+- Run `tests/integration/test_ollama_real.py` on the WSL machine
+  (procedure: `docs/OLLAMA.md`) → #5 unblocks; #3's reachable-path gap
+  closes.
+- Run the 5-run real-gateway variance procedure (`docs/OLLAMA.md`) →
+  #17 unblocks, and #22 can be re-walked.
+- First observed GitHub Actions run of `.github/workflows/ci.yml` →
+  #21's CI gap closes.
+- A host with cppcheck installed → the sandboxed-cppcheck path (currently
+  fixed in code, unexercised here because the tool is absent) gets its
+  first real run.

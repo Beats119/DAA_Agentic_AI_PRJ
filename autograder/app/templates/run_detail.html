@@ -10,6 +10,15 @@
     <a href="/api/artifacts/{{ run_id }}/evidence.json">evidence.json</a> ·
     <a href="/api/artifacts/{{ run_id }}/manifest.json">manifest.json</a>
   </p>
+{% elif terminal %}
+  <h2>Run <span class="mono">{{ run_id[:12] }}…</span></h2>
+  <p>Status: <span class="badge badge-{{ status }}">{{ status }}</span></p>
+  {% if status == "failed" %}
+  <p>This evaluation <b>failed</b>{% if error %} — {{ error }}{% endif %}</p>
+  <p class="muted">No report was produced for this run.</p>
+  {% else %}
+  <p class="muted">This run ended as {{ status }}, but its report could not be loaded.</p>
+  {% endif %}
 {% else %}
   <h2>Run <span class="mono">{{ run_id[:12] }}…</span></h2>
   <p><span class="spin"></span> Status: <span class="badge badge-{{ status }}">{{ status }}</span></p>
@@ -18,7 +27,7 @@
 {% endif %}
 {% endblock %}
 {% block scripts %}
-{% if not report_html %}
+{% if not report_html and not terminal %}
 <script>AG.pollRun("{{ run_id }}");</script>
 {% endif %}
 {% endblock %}
