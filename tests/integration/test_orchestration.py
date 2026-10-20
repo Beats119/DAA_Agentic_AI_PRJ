@@ -7,7 +7,6 @@ and is never imported by production code.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import shutil
@@ -69,8 +68,6 @@ class FakeGateway:
             ReviewCriterion,
         )
         from autograder.app.core.schemas import (
-            ExpectedOutput,
-            ExpectedProvenance,
             Requirement,
             RequirementSource,
             SpecExample,
@@ -102,9 +99,6 @@ class FakeGateway:
                 extraction_diagnostics={"fake": True},
             )
         if task == "test_generation":
-            prov = ExpectedProvenance(
-                tier="tier3_llm", method="llm_proposed",
-                detail="candidate only; oracle decides")
             return CandidateList(candidates=[
                 TestCandidate(
                     id="t1", input="2 3", input_category="normal",
@@ -376,7 +370,7 @@ def test_feedback_verification_rejects_bad_evidence_id(tmp_path):
     """Bad evidence id -> verifier rejects -> bounded retry -> fallback."""
     from autograder.app.orchestration.evidence import EvidenceRegistry
     from autograder.app.orchestration.feedback import (
-        finalize_feedback, verify_feedback)
+        finalize_feedback)
 
     registry = EvidenceRegistry("fbtest")
     good_id = registry.append("test_result", "correctness",

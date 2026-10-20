@@ -9,13 +9,10 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from conftest import make_rules
 
 from autograder.app.core.schemas import (
-    AssignmentDoc,
-    PageText,
     Specification,
     Requirement,
     RequirementSource,

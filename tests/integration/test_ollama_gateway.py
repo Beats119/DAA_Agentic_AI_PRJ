@@ -15,7 +15,7 @@ from autograder.app.ollama.client import (
     OllamaModelMissing,
     OllamaUnreachable,
 )
-from autograder.app.ollama.health import ensure_model, probe
+from autograder.app.ollama.health import probe
 
 
 class _Item(BaseModel):
