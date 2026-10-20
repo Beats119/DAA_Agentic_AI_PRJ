@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block title %}Report {{ run_id[:12] }} · AutoGrader{% endblock %}
+{% block content %}
+{{ report_html|safe }}
+{% endblock %}

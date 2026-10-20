@@ -1,0 +1,154 @@
+{# Full evaluation report fragment. Autoescape is ON: every {{ }} is escaped. #}
+{% macro kv(d) -%}
+  {% if d %}
+  <table class="kv">
+    {% for k, v in d.items() %}
+    <tr><th>{{ k }}</th><td>{{ v if v is not none else "—" }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">No data recorded.</p>{% endif %}
+{%- endmacro %}
+
+<section class="report">
+  <header class="report-head">
+    <div>
+      <h2>Evaluation report</h2>
+      <p class="muted mono">run {{ report.run_id }}</p>
+    </div>
+    <div class="grade-hero">
+      <div class="grade-value">{{ "%.1f"|format(report.grade) if report.grade is not none else "—" }}</div>
+      <div class="grade-label">grade / 100</div>
+      <span class="badge badge-{{ report.status }}">{{ report.status }}</span>
+    </div>
+  </header>
+
+  <div class="hashes">
+    <div><span class="muted">submission</span> <code title="{{ report.submission.source_hash|redact_paths }}">{{ report.submission.source_hash|short_hash }}</code></div>
+    <div><span class="muted">assignment</span> <code title="{{ report.assignment.spec_hash|redact_paths }}">{{ report.assignment.spec_hash|short_hash }}</code></div>
+    <div><span class="muted">rules {{ report.rules.version }}</span> <code title="{{ report.rules.hash|redact_paths }}">{{ report.rules.hash|short_hash }}</code></div>
+  </div>
+
+  <h3>Metrics</h3>
+  <table class="metrics">
+    <thead><tr><th>Metric</th><th>Analyzer</th><th>Weight</th><th>Score</th><th>Contribution</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for m in report.metrics %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td class="mono">{{ m.analyzer }}</td>
+        <td class="num">{{ "%.2f"|format(m.weight) }}</td>
+        <td class="num">{{ "%.3f"|format(m.score) if m.score is not none else "—" }}</td>
+        <td class="num">{{ "%.2f"|format(m.contribution) }}</td>
+        <td><span class="badge badge-{{ m.status }}">{{ m.status }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+    {% if report.grade is not none %}
+    <tfoot><tr><td colspan="4" class="num"><strong>Total</strong></td><td class="num"><strong>{{ "%.2f"|format(contrib_total) }}</strong></td><td></td></tr></tfoot>
+    {% endif %}
+  </table>
+  {% if report.grade is not none %}
+  <p class="muted small">Total {{ "%.2f"|format(contrib_total) }} reconciles with grade {{ "%.1f"|format(report.grade) }} (tolerance 0.05).</p>
+  {% else %}
+  <p class="muted small">No grade computed for this run — see uncertainty &amp; limitations.</p>
+  {% endif %}
+
+  <h3>Tests <span class="muted small">({{ report.test_stats.trusted }} trusted · {{ report.test_stats.validated }} validated · {{ report.passing_tests }} passing)</span></h3>
+  {% if report.failing_tests %}
+  <table class="tests">
+    <thead><tr><th>Test</th><th>Input</th><th>Expected (oracle)</th><th>Actual</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for t in report.failing_tests %}
+      <tr>
+        <td class="mono">{{ t.test_id }}</td>
+        <td><pre>{{ t.input }}</pre></td>
+        <td><pre>{{ t.expected }}</pre><div class="muted small">oracle: {{ t.expected_provenance.tier }} / {{ t.expected_provenance.method }}</div></td>
+        <td><pre>{{ t.actual if t.actual is not none else "—" }}</pre></td>
+        <td>{{ t.note }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No failing trusted tests recorded.</p>
+  {% endif %}
+
+  {% if report.compiler_diagnostics %}
+  <h3>Compiler diagnostics</h3>
+  <pre class="diag">{{ report.compiler_diagnostics|join("\n")|redact_paths }}</pre>
+  {% endif %}
+
+  {% if report.runtime_measurements %}
+  <h3>Runtime measurements</h3>
+  {{ kv(report.runtime_measurements) }}
+  {% endif %}
+
+  {% if report.memory_safety %}
+  <h3>Memory safety</h3>
+  {{ kv(report.memory_safety) }}
+  {% endif %}
+
+  {% if report.complexity %}
+  <h3>Complexity</h3>
+  {{ kv(report.complexity) }}
+  {% endif %}
+
+  {% if report.similarity %}
+  <h3>Similarity</h3>
+  {{ kv(report.similarity) }}
+  <p class="muted small">Similarity scores flag submissions for human review only. They are not proof of authorship, copying, or AI generation.</p>
+  {% endif %}
+
+  {% if report.feedback %}
+  <h3>Feedback</h3>
+  <p>{{ report.feedback.summary }}</p>
+  {% if report.feedback.per_failure %}
+  <table class="feedback">
+    <thead><tr><th>Evidence</th><th>Explanation</th><th>Suggestion</th></tr></thead>
+    <tbody>
+    {% for f in report.feedback.per_failure %}
+      <tr><td class="mono">{{ f.evidence_id }}</td><td>{{ f.explanation }}</td><td>{{ f.suggestion }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% if report.feedback.recommendations %}
+  <h4>Recommendations</h4>
+  <ul>{% for r in report.feedback.recommendations %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% endif %}
+
+  {% if report.suggestions and not report.feedback %}
+  <h3>Suggestions</h3>
+  <ul>{% for s in report.suggestions %}<li>{{ s }}</li>{% endfor %}</ul>
+  {% endif %}
+
+  <h3>Uncertainty &amp; limitations</h3>
+  {% if report.uncertainty or report.limitations %}
+  <ul class="warn">
+    {% for u in report.uncertainty %}<li>{{ u }}</li>{% endfor %}
+    {% for l in report.limitations %}<li>{{ l }}</li>{% endfor %}
+  </ul>
+  {% else %}<p class="muted">None recorded.</p>{% endif %}
+
+  <h3>Provenance</h3>
+  <h4>Tool versions</h4>
+  {{ kv(report.tool_versions) }}
+  {% if report.models %}
+  <h4>Models</h4>
+  <table class="kv">
+    <thead><tr><th>Task</th><th>Model</th><th>Temp</th><th>Seed</th><th>Prompt</th></tr></thead>
+    <tbody>
+    {% for m in report.models %}
+      <tr><td>{{ m.task }}</td><td class="mono">{{ m.model }}</td><td class="num">{{ m.temperature }}</td><td class="num">{{ m.seed if m.seed is not none else "—" }}</td><td class="mono">{{ m.prompt_version }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted small">No LLM steps ran for this evaluation.</p>{% endif %}
+  <p class="muted small">Scoring policy {{ report.scoring_policy_version }}. {{ report.reproduction.notes }}</p>
+
+  {% if source_code is not none %}
+  <h3>Submitted source</h3>
+  <pre class="source"><code>{{ source_code }}</code></pre>
+  {% endif %}
+</section>

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · AutoGrader{% endblock %}
+{% block content %}
+<h2>Dashboard</h2>
+<div class="chips">
+  <span class="chip">Ollama: {% if ollama.reachable %}<b>reachable</b> ({{ ollama.models|length }} models){% else %}<b style="color:var(--warn)">unreachable</b> — LLM steps will be skipped honestly{% endif %}</span>
+  <span class="chip">Sandbox: <b>{{ "ready" if sandbox_ok else "UNAVAILABLE (fail-closed)" }}</b></span>
+  <span class="chip">Scoring policy: <b>{{ scoring_policy }}</b></span>
+</div>
+<p><a class="btn" href="/new">+ New evaluation</a></p>
+<h3>Recent runs</h3>
+{% if runs %}
+<table>
+  <thead><tr><th>Run</th><th>Created</th><th>Status</th><th>Grade</th><th></th></tr></thead>
+  <tbody>
+  {% for r in runs %}
+    <tr>
+      <td class="mono">{{ r.id[:12] }}…</td>
+      <td class="muted">{{ r.created_at }}</td>
+      <td><span class="badge badge-{{ r.state }}">{{ r.state }}</span></td>
+      <td class="num">{{ r.grade if r.grade is not none else "—" }}</td>
+      <td><a href="/runs/{{ r.id }}">view</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No evaluations yet. <a href="/new">Run your first evaluation</a>.</p>
+{% endif %}
+{% endblock %}

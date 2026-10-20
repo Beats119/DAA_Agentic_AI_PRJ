@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}New evaluation · AutoGrader{% endblock %}
+{% block content %}
+<h2>New evaluation</h2>
+{% if not ollama.reachable %}
+<div class="flash">Ollama is unreachable ({{ ollama.error }}). The evaluation will still run deterministically, but specification extraction, LLM test generation and LLM feedback will be skipped and reported as limitations — no silent degradation.</div>
+{% endif %}
+<form id="eval-form" method="post" action="/api/evaluations" enctype="application/x-www-form-urlencoded">
+  <label for="assignment_id">Assignment</label>
+  <select id="assignment_id" name="assignment_id" required>
+    <option value="">— upload below or pick an existing one —</option>
+    {% for a in assignments %}<option value="{{ a.id }}">{{ a.filename }} ({{ a.id[:8] }})</option>{% endfor %}
+  </select>
+  <label for="assignment_file">…or upload assignment PDF (≤ 20 MB)</label>
+  <input type="file" id="assignment_file" name="assignment_file" accept=".pdf,.txt,.md">
+
+  <label for="submission_id">Student C submission</label>
+  <select id="submission_id" name="submission_id" required>
+    <option value="">— upload below or pick an existing one —</option>
+    {% for s in submissions %}<option value="{{ s.id }}">{{ s.filename }} ({{ s.id[:8] }})</option>{% endfor %}
+  </select>
+  <label for="submission_file">…or upload C source (≤ 1 MB)</label>
+  <input type="file" id="submission_file" name="submission_file" accept=".c">
+
+  <label for="rules_id">Grading rules</label>
+  <select id="rules_id" name="rules_id" required>
+    {% for r in rules %}<option value="{{ r.id }}" {% if loop.first %}selected{% endif %}>{{ r.name }} — v{{ r.version }}</option>{% endfor %}
+  </select>
+  <p class="muted small">Rules are versioned and hashed; the exact config used is recorded in the run manifest. <a href="/rules">Manage rules</a>.</p>
+
+  <p><button class="btn" type="submit">Start evaluation</button></p>
+</form>
+<div id="eval-progress"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('eval-form').addEventListener('submit', function(ev){
+  ev.preventDefault();
+  AG.startEvaluation(new FormData(ev.target));
+});
+</script>
+{% endblock %}

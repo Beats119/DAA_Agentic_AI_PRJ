@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Rules · AutoGrader{% endblock %}
+{% block content %}
+<h2>Grading rules</h2>
+<p class="muted">Versioned grading policies. Invalid configs are rejected with structured errors — never silently normalized.</p>
+<table>
+  <thead><tr><th>Name</th><th>Version</th><th>Hash</th><th>Metrics</th></tr></thead>
+  <tbody>
+  {% for r in rules %}
+    <tr>
+      <td>{{ r.name }}</td>
+      <td class="mono">{{ r.version }}</td>
+      <td><code title="{{ r.hash }}">{{ r.hash|short_hash }}</code></td>
+      <td class="muted small">{{ r.metrics|join(", ") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<h3>Upload new rules</h3>
+<form id="rules-form" enctype="multipart/form-data">
+  <label for="rules_file">Rules JSON or YAML</label>
+  <input type="file" id="rules_file" name="file" accept=".json,.yaml,.yml" required>
+  <p><button class="btn" type="submit">Validate &amp; save</button></p>
+</form>
+<div id="rules-result"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('rules-form').addEventListener('submit', async function(ev){
+  ev.preventDefault();
+  const out = document.getElementById('rules-result');
+  out.innerHTML = '<p><span class="spin"></span> Validating…</p>';
+  const fd = new FormData(ev.target);
+  const resp = await fetch('/api/rules', {method:'POST', body: fd});
+  const data = await resp.json();
+  if (resp.ok) {
+    out.innerHTML = '<div class="flash">Saved: <b>'+AG.esc(data.id)+'</b> v'+AG.esc(data.version)+'</div>';
+    setTimeout(()=>location.reload(), 1200);
+  } else {
+    const errs = (data.errors||[data.detail||'invalid']).map(e=>'<li>'+AG.esc(e)+'</li>').join('');
+    out.innerHTML = '<div class="flash err"><b>Rejected ('+resp.status+'):</b><ul>'+errs+'</ul></div>';
+  }
+});
+</script>
+{% endblock %}

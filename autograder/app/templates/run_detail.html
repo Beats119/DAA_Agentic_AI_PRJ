@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run_id[:12] }} · AutoGrader{% endblock %}
+{% block content %}
+{% if report_html %}
+  {{ report_html|safe }}
+  <p class="muted small" style="margin-top:16px">
+    Downloads:
+    <a href="/api/artifacts/{{ run_id }}/report.json">report.json</a> ·
+    <a href="/api/artifacts/{{ run_id }}/report.html">report.html</a> ·
+    <a href="/api/artifacts/{{ run_id }}/evidence.json">evidence.json</a> ·
+    <a href="/api/artifacts/{{ run_id }}/manifest.json">manifest.json</a>
+  </p>
+{% else %}
+  <h2>Run <span class="mono">{{ run_id[:12] }}…</span></h2>
+  <p><span class="spin"></span> Status: <span class="badge badge-{{ status }}">{{ status }}</span></p>
+  <p class="muted">The evaluation is running. This page refreshes automatically when it finishes.</p>
+  <div id="run-progress" data-run-id="{{ run_id }}"></div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+{% if not report_html %}
+<script>AG.pollRun("{{ run_id }}");</script>
+{% endif %}
+{% endblock %}

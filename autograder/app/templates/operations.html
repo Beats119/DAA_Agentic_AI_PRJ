@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Operations · AutoGrader{% endblock %}
+{% block content %}
+<h2>Operations</h2>
+
+<h3>Ollama</h3>
+<div class="card">
+  {% if ollama.reachable %}
+  <p><span class="badge badge-completed">reachable</span> <span class="mono">{{ ollama_url }}</span></p>
+  <p>Installed models ({{ ollama.models|length }}):</p>
+  <ul>{% for m in ollama.models %}<li class="mono">{{ m }}</li>{% endfor %}</ul>
+  {% if ollama.recommended %}<p class="muted small">Recommended for this hardware: {{ ollama.recommended|join(", ") }}</p>{% endif %}
+  {% else %}
+  <p><span class="badge badge-failed">unreachable</span></p>
+  <p class="muted">{{ ollama.error }}</p>
+  <p class="muted small">Without Ollama, LLM steps (spec extraction, test generation, readability, feedback drafting) are skipped with explicit limitations. Deterministic analyzers and scoring still run.</p>
+  {% endif %}
+</div>
+
+<h3>Sandbox capabilities</h3>
+<table>
+  <thead><tr><th>Capability</th><th>Available</th></tr></thead>
+  <tbody>
+  {% for name, ok in sandbox.items() %}
+    <tr><td class="mono">{{ name }}</td><td>{% if ok %}<span class="badge badge-completed">yes</span>{% else %}<span class="badge badge-incomplete">no</span>{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="muted small">Evaluations fail closed: untrusted code never runs without the minimum isolation bar (resource limits + process-group kill).</p>
+
+<h3>Versions</h3>
+<table class="kv">
+  {% for k, v in versions.items() %}
+  <tr><th>{{ k }}</th><td class="mono">{{ v }}</td></tr>
+  {% endfor %}
+</table>
+
+<h3>Prompt assets</h3>
+<table>
+  <thead><tr><th>Prompt</th><th>Version</th></tr></thead>
+  <tbody>
+  {% for p in prompts %}
+    <tr><td class="mono">{{ p.name }}</td><td class="mono">{{ p.version }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

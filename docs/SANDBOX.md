@@ -38,6 +38,17 @@ map cannot be written the child would run as the overflow uid with confusing
 semantics. Landlock + netns + rlimits give stronger, verifiable guarantees
 without them.
 
+## Landlock application details (Phase 6 fix)
+
+`apply_landlock()` runs in the sandboxed child **after** `RLIMIT_NPROC` is
+set. The ABI probe it depends on (`landlock_abi_version()`) is therefore
+**fork-free by design**: it calls `landlock_create_ruleset` directly via
+`ctypes` (which merely allocates a ruleset FD) instead of forking a probe
+child. An earlier design forked the probe after the nproc limit was
+applied; under load that fork could fail with `EAGAIN` and wrongly refuse
+execution. The current code cannot hit that race — verified by the
+fork-bomb containment test running concurrently with Landlock application.
+
 ## Fail-closed behavior
 
 - `SandboxExecutor.ensure_available()` raises `SandboxUnavailable` when
@@ -85,10 +96,11 @@ Expected on a standard WSL2 kernel (≥ 5.15):
 pytest tests/security -q
 ```
 
-Nine test modules, all with real hostile binaries: infinite loop (+forked
+Eleven test modules, all with real hostile binaries: infinite loop (+forked
 sleeper, proves `killpg`), memory bomb (`RLIMIT_AS` → `SIGSEGV`), output
 flood (byte cap), fork bomb (`RLIMIT_NPROC` + tree kill), filesystem escape
 (Landlock denies `/tmp` and `../../escape`), segfault (signal recorded),
 compiler failures (structured diagnostics + path-traversal rejection),
 network isolation (honest reporting), fail-closed (degraded host refuses to
-run). No mocks — every assertion requires the real mechanism to work.
+run), capabilities probe honesty, oracle-under-sandbox. No mocks — every
+assertion requires the real mechanism to work.
