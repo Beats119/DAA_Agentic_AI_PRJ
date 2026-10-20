@@ -65,6 +65,60 @@ class AnalyzerContext:
     budget_tracker: Any | None = None
     _evidence_seq: int = field(default=0, repr=False)
 
+    def to_spec(self, gateway_spec: dict[str, Any] | None) -> dict[str, Any]:
+        """Serialize this context to plain JSON-safe data for a worker process.
+
+        The analyzer coordinator runs each analyzer in its own subprocess
+        (see ``orchestration.worker``); everything the worker needs to
+        rebuild an equivalent context travels in this spec. Live objects
+        are represented by their construction parameters:
+
+        - ``executor`` -> its base dir / namespace / Landlock flags and the
+          sandbox policy dump (the worker constructs a fresh executor);
+        - ``gateway`` -> ``gateway_spec`` (a factory reference supplied by
+          the caller, since the parent holds the live client);
+        - ``compiler`` -> always the production ``compile_c`` entry point;
+        - ``budget_tracker`` -> a counter snapshot (the worker returns its
+          final counters; the coordinator reconciles the deltas);
+        - ``compile_result`` / ``rules`` / ``metric`` / ``test_cases`` ->
+          their Pydantic JSON dumps.
+
+        In-process construction (unit tests, direct calls) is unaffected.
+        """
+        executor = self.executor
+        executor_spec: dict[str, Any] | None = None
+        if executor is not None:
+            policy = getattr(executor, "policy", None)
+            executor_spec = {
+                "base_dir": str(getattr(executor, "base_dir", "") or ""),
+                "use_network_namespace": bool(
+                    getattr(executor, "use_network_namespace", True)),
+                "use_landlock": bool(getattr(executor, "use_landlock", True)),
+                "policy": (policy.model_dump(mode="json")
+                           if hasattr(policy, "model_dump") else None),
+            }
+        tracker = self.budget_tracker
+        return {
+            "source_path": self.source_path,
+            "binary_path": self.binary_path,
+            "sanitizer_binary_path": self.sanitizer_binary_path,
+            "rules": self.rules.model_dump(mode="json"),
+            "metric": self.metric.model_dump(mode="json"),
+            "run_dir": self.run_dir,
+            "run_id": self.run_id,
+            "test_cases": [tc.model_dump(mode="json")
+                           for tc in self.test_cases],
+            "compile_result": (self.compile_result.model_dump(mode="json")
+                               if self.compile_result is not None else None),
+            "evidence": [ev.model_dump(mode="json") for ev in self.evidence],
+            "evidence_seq": self._evidence_seq,
+            "executor": executor_spec,
+            "gateway": gateway_spec,
+            "budget": (tracker.snapshot()
+                       if tracker is not None
+                       and hasattr(tracker, "snapshot") else None),
+        }
+
     def add_evidence(
         self,
         analyzer_id: str,

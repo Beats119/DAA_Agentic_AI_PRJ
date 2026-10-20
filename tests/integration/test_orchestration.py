@@ -269,6 +269,36 @@ def test_full_workflow_fake_gateway(assignment_pdf, rules_path, source_path,
     # The correct submission should score well.
     assert result.report.grade >= 70.0
 
+    # D16 regression: a successful LLM run must NOT carry the false
+    # "no specification available" limitation (the spec WAS extracted).
+    assert not any("no specification available" in lim
+                   for lim in result.report.limitations), \
+        result.report.limitations
+    assert not any("no specification available" in u
+                   for u in result.report.uncertainty)
+
+    # D20 regression: the manifest is finalized with the terminal state
+    # and a finish timestamp; tool versions are probed/constants, not
+    # hand-written strings.
+    manifest = json.loads(
+        (Path(result.artifacts_dir) / "manifest.json").read_text())
+    assert manifest["state"] == result.status
+    assert manifest["finished_at"] is not None
+    from autograder.app.sandbox.executor import SANDBOX_VERSION
+    assert manifest["tool_versions"]["sandbox"] == SANDBOX_VERSION
+    assert manifest["tool_versions"]["python"] != "3.11+"
+    assert manifest["tool_versions"]["app"]
+
+    # D20 regression: test-generation provenance carries the REAL model
+    # id + prompt version (flat GenerationRecord shape), not "unknown".
+    gen_records = [m for m in result.report.models
+                   if m.task == "test_generation"]
+    assert gen_records, "no test_generation model records"
+    assert all(m.model == "fake-test-model" for m in gen_records)
+    assert all(m.prompt_version == "test-1.0" for m in gen_records)
+    assert manifest["model_settings"]["test_generation"]["model"] == \
+        "fake-test-model"
+
 
 def test_determinism_same_evidence_same_score(assignment_pdf, rules_path,
                                               source_path, tmp_path):
@@ -296,6 +326,15 @@ def test_degraded_no_gateway(assignment_pdf, rules_path, source_path,
     assert len(result.report.limitations) > 0
     assert any("no LLM gateway" in lim
                for lim in result.report.limitations)
+    # D16: here the spec genuinely is unavailable, so the plan's spec
+    # warning MUST be present (contrast with the successful-LLM test).
+    assert any("no specification available" in lim
+               for lim in result.report.limitations)
+    # D20: no-LLM provenance is stated honestly, never "unknown".
+    assert result.report.models, "no model records on degraded run"
+    assert all(m.model == "none (llm unavailable)"
+               for m in result.report.models)
+    assert all(m.prompt_version == "none" for m in result.report.models)
     # Deterministic fallback feedback, still verified structurally.
     assert result.feedback_info["used_fallback"] is True
     assert result.feedback.summary  # non-empty
@@ -303,13 +342,18 @@ def test_degraded_no_gateway(assignment_pdf, rules_path, source_path,
 
 def test_partial_analyzer_failure(assignment_pdf, rules_path, source_path,
                                    tmp_path, monkeypatch):
-    """One analyzer raising -> failed result, completed_with_warnings."""
-    import autograder.app.analyzers.modularity.analyzer as mod
+    """One analyzer raising -> failed result, completed_with_warnings.
 
-    def boom(ctx):
-        raise RuntimeError("simulated analyzer crash")
+    Phase E: analyzers run in worker subprocesses, so the crash is
+    injected by pointing the registry at a test-only module whose
+    ``analyze`` raises (``tests.integration.boom_analyzers``) — the
+    worker imports it fresh and the failure crosses the real process
+    boundary, exactly as a production analyzer crash would.
+    """
+    from autograder.app.orchestration import planner as planner_mod
 
-    monkeypatch.setattr(mod, "analyze", boom)
+    monkeypatch.setitem(planner_mod.ANALYZER_MODULES, "modularity",
+                        "tests.integration.boom_analyzers")
     # Make modularity optional so the run degrades instead of going incomplete.
     data = json.loads(Path(rules_path).read_text())
     for m in data["metrics"]:

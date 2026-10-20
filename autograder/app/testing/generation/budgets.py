@@ -52,7 +52,8 @@ def effective_budgets(policy) -> dict[str, int]:
 class BudgetTracker:
     """Per-run consumption counter for the token and execution budgets.
 
-    Thread-safe (analyzers run on a thread pool). ``try_consume_exec``
+    Thread-safe (and snapshot-able for analyzer worker processes).
+    ``try_consume_exec``
     must be called *before* each sandbox execution charged to the run;
     it returns False — and consumes nothing — once the execution budget
     is exhausted. Token usage is recorded after each LLM call via
@@ -110,3 +111,39 @@ class BudgetTracker:
                 return False
             self._execs_used += 1
             return True
+
+    def add_execs(self, n: int) -> int:
+        """Record ``n`` executions consumed elsewhere; returns the new total.
+
+        Used by the analyzer coordinator to reconcile consumption reported
+        by analyzer worker processes into the run's single tracker (each
+        worker is seeded from :meth:`snapshot` and reports its final
+        counters back; the coordinator adds the per-worker deltas).
+        """
+        if n < 0:
+            raise ValueError("execution usage cannot be negative")
+        with self._lock:
+            self._execs_used += int(n)
+            return self._execs_used
+
+    # -- cross-process snapshots (analyzer worker seeding/reconciliation) -- #
+    def snapshot(self) -> dict[str, int]:
+        """Plain-data snapshot of budgets + counters (JSON-safe)."""
+        with self._lock:
+            return {
+                "token_budget": self.token_budget,
+                "exec_budget": self.exec_budget,
+                "tokens_used": self._tokens_used,
+                "execs_used": self._execs_used,
+            }
+
+    @classmethod
+    def from_snapshot(cls, snap: dict) -> "BudgetTracker":
+        """Rebuild a tracker from :meth:`snapshot` data (worker processes)."""
+        tracker = cls(
+            token_budget=int(snap["token_budget"]),
+            exec_budget=int(snap["exec_budget"]),
+        )
+        tracker._tokens_used = int(snap.get("tokens_used", 0))
+        tracker._execs_used = int(snap.get("execs_used", 0))
+        return tracker
