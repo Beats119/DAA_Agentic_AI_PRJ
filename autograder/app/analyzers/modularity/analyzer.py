@@ -2,7 +2,12 @@
 
 Best-effort regex-based extraction of top-level C function definitions.
 Records ``parse_confidence`` (fraction of candidate definitions successfully
-parsed with balanced braces). Scoring is threshold-based from
+parsed with balanced braces) and ``parse_candidates`` (how many candidates
+were seen at all) — the distinction matters: "no candidates" means the
+source has no function-like definitions, while "candidates but none parsed"
+means the source style (K&R definitions, macro-generated functions,
+preprocessor-split bodies) defeated the parser, and the result says so
+instead of claiming there are no functions. Scoring is threshold-based from
 ``metric.params``; findings name the offending functions.
 
 ``exclude_main_from_length`` (default True): ``main()`` is not flagged for
@@ -49,8 +54,14 @@ def _strip_comments_strings(source: str) -> str:
     return source
 
 
-def _extract_functions(source: str) -> tuple[list[dict[str, Any]], float]:
-    """Return (functions, parse_confidence). Each function: name, start_line, loc."""
+def _extract_functions(source: str) -> tuple[list[dict[str, Any]], float, int]:
+    """Return (functions, parse_confidence, total_candidates).
+
+    Each function: name, start_line, loc. ``total_candidates`` counts every
+    function-like header seen, including ones that could not be parsed —
+    callers use it to tell "no functions present" apart from "parser
+    defeated by unsupported constructs".
+    """
     clean = _strip_comments_strings(source)
     lines = clean.splitlines()
     functions: list[dict[str, Any]] = []
@@ -84,7 +95,7 @@ def _extract_functions(source: str) -> tuple[list[dict[str, Any]], float]:
         body_lines = [ln for ln in lines[start_line - 1 : end_line] if ln.strip()]
         functions.append({"name": name, "start_line": start_line, "loc": len(body_lines)})
     confidence = (parsed_ok / total_candidates) if total_candidates else 0.0
-    return functions, confidence
+    return functions, confidence, total_candidates
 
 
 def analyze(ctx: AnalyzerContext) -> Any:
@@ -99,24 +110,61 @@ def analyze(ctx: AnalyzerContext) -> Any:
             diagnostics={"reason": f"could not read source: {exc}"},
         )
 
-    functions, confidence = _extract_functions(source)
+    functions, confidence, candidates = _extract_functions(source)
     exclude_main = bool(params["exclude_main_from_length"])
     score = 1.0
     findings: list[str] = []
     warnings: list[str] = []
 
-    if confidence < 0.5 and functions:
+    if 0.0 < confidence < 0.5:
         warnings.append(
-            f"function parsing is uncertain (confidence {confidence:.2f}); "
-            "results are approximate"
+            f"function parsing is uncertain (confidence {confidence:.2f}: "
+            f"{len(functions)} of {candidates} candidate definitions "
+            "parsed); results are approximate"
         )
 
     n = len(functions)
     if n == 0:
+        if candidates > 0:
+            # The parser SAW function-like definitions but could not
+            # parse any of them — an unsupported-style limitation, not
+            # evidence that the source has no functions.
+            return build_result(
+                metric=ctx.metric,
+                analyzer_id=ANALYZER_ID,
+                status="inconclusive",
+                measurements={
+                    "function_count": 0,
+                    "parse_candidates": candidates,
+                    "parse_confidence": round(confidence, 3),
+                },
+                diagnostics={
+                    "reason": "function-like definitions were found but "
+                              "none could be parsed (parse confidence "
+                              "0.00); the source style is not supported "
+                              "by the regex parser"
+                },
+                warnings=[
+                    f"{candidates} function-like definition(s) detected "
+                    "but none could be parsed — macro-generated functions, "
+                    "preprocessor-split bodies, or other unsupported "
+                    "constructs defeat the parser; modularity cannot be "
+                    "assessed for this source"
+                ],
+                limitations=[
+                    "regex-based parsing is approximate; complex macros or "
+                    "K&R style may reduce parse confidence"
+                ],
+            )
         return build_result(
             metric=ctx.metric,
             analyzer_id=ANALYZER_ID,
             status="inconclusive",
+            measurements={
+                "function_count": 0,
+                "parse_candidates": 0,
+                "parse_confidence": round(confidence, 3),
+            },
             diagnostics={"reason": "no function definitions detected"},
             warnings=["could not detect any functions — modularity cannot be assessed"],
         )
@@ -152,6 +200,7 @@ def analyze(ctx: AnalyzerContext) -> Any:
                 "function_count": n,
                 "functions": functions,
                 "parse_confidence": round(confidence, 3),
+                "parse_candidates": candidates,
                 "max_loc": max(locs),
                 "avg_loc": round(sum(locs) / len(locs), 2),
                 "exclude_main_from_length": exclude_main,
@@ -170,6 +219,7 @@ def analyze(ctx: AnalyzerContext) -> Any:
             "max_loc": max(locs),
             "avg_loc": round(sum(locs) / len(locs), 2),
             "parse_confidence": round(confidence, 3),
+            "parse_candidates": candidates,
             "long_functions": [f["name"] for f in long_fns],
         },
         evidence_refs=evidence_refs,

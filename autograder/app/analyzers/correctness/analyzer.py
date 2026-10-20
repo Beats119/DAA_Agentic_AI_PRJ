@@ -7,6 +7,15 @@ False) and are reported under separate stats — they NEVER affect the score.
 
 Score = passed_trusted / total_trusted. With zero trusted tests the result is
 ``inconclusive`` (score None), never 0.0.
+
+Execution outcomes are classified (D15): ``run_ok`` — the sandbox actually
+executed the program, so pass/fail is the student's; ``infra_error`` — the
+sandbox itself could not execute (executor refusal, launcher failure,
+enforcement not established), so the test says nothing about the student.
+Infra-error tests are EXCLUDED from the pass/fail fraction, counted in
+``measurements["infra_errors"]``, and surfaced as warnings. If every
+trusted test infra-errors, the result is ``inconclusive`` — infrastructure
+failure is never converted into student failure.
 """
 
 from __future__ import annotations
@@ -39,8 +48,27 @@ def _limits_for(rules, params: dict[str, Any]) -> ExecLimits:
     )
 
 
+def _enforcement_established(result: Any) -> bool:
+    """True unless the run's enforcement report shows a mandatory
+    mechanism missing. A result without an enforcement report (duck-typed
+    test doubles) is treated as executed; the real executor refuses with
+    SandboxError before ever returning such a result."""
+    enf = getattr(result, "enforcement", None)
+    if enf is None:
+        return True
+    return all(
+        getattr(enf, name, True)
+        for name in ("landlock_fs", "seccomp_filter", "network_isolated")
+    )
+
+
 def _run_one(ctx: AnalyzerContext, binary: str, tc: TestCase, limits: ExecLimits) -> dict[str, Any]:
-    """Execute one test case; return a structured per-test record."""
+    """Execute one test case; return a structured per-test record.
+
+    The record's ``outcome`` is ``run_ok`` when the program actually ran
+    (pass/fail is then the student's) or ``infra_error`` when the sandbox
+    could not execute it (D15 — never scored as a student failure).
+    """
     try:
         result = ctx.executor.run([binary], tc.input, limits)
     except Exception as exc:  # sandbox refusal etc. — recorded, not hidden
@@ -50,9 +78,24 @@ def _run_one(ctx: AnalyzerContext, binary: str, tc: TestCase, limits: ExecLimits
             "expected": tc.expected.value,
             "actual": None,
             "passed": False,
+            "outcome": "infra_error",
             "oracle_status": tc.status,
             "oracle_provenance": tc.expected.provenance.model_dump(),
             "error": f"execution failed: {exc}",
+            "timed_out": False,
+            "signal": None,
+        }
+    if not _enforcement_established(result):
+        return {
+            "id": tc.id,
+            "input": tc.input,
+            "expected": tc.expected.value,
+            "actual": None,
+            "passed": False,
+            "outcome": "infra_error",
+            "oracle_status": tc.status,
+            "oracle_provenance": tc.expected.provenance.model_dump(),
+            "error": "sandbox enforcement not established for this run",
             "timed_out": False,
             "signal": None,
         }
@@ -67,6 +110,7 @@ def _run_one(ctx: AnalyzerContext, binary: str, tc: TestCase, limits: ExecLimits
         "expected": tc.expected.value,
         "actual": actual,
         "passed": passed,
+        "outcome": "run_ok",
         "oracle_status": tc.status,
         "oracle_provenance": tc.expected.provenance.model_dump(),
         "timed_out": result.timed_out,
@@ -142,7 +186,10 @@ def analyze(ctx: AnalyzerContext) -> Any:
         evidence_refs.append(
             ctx.add_evidence(
                 ANALYZER_ID,
-                "test_result",
+                # Infra failures get their own kind so downstream consumers
+                # (feedback's trusted-results rebuild) can never mistake
+                # them for recorded test failures (D15).
+                "test_result" if rec["outcome"] == "run_ok" else "test_infra_error",
                 rec,
                 confidence=1.0,
             )
@@ -176,6 +223,38 @@ def analyze(ctx: AnalyzerContext) -> Any:
             ],
         )
 
+    # D15: split attempted runs into executed vs infrastructure failures.
+    executed = [r for r in per_test if r["outcome"] == "run_ok"]
+    infra_errors = [r for r in per_test if r["outcome"] == "infra_error"]
+
+    if infra_errors and not executed:
+        # Every attempted trusted test failed to EXECUTE — the
+        # infrastructure, not the student, failed. Inconclusive, never a
+        # zero. (The budget-exhausted-with-zero-attempts case returned
+        # earlier; this covers attempts that all infra-failed.)
+        return build_result(
+            metric=ctx.metric,
+            analyzer_id=ANALYZER_ID,
+            status="inconclusive",
+            evidence_refs=evidence_refs,
+            diagnostics={
+                "reason": "execution infrastructure failed for all "
+                          "trusted tests",
+                "infra_errors": len(infra_errors),
+                "first_error": infra_errors[0].get("error"),
+            },
+            warnings=[
+                "execution infrastructure failed for all "
+                f"{len(infra_errors)} trusted test(s) — correctness is "
+                "inconclusive, not zero"
+            ],
+            limitations=[
+                "execution infrastructure failed for all tests",
+                "only tests with oracle status 'trusted' contribute confirmed "
+                "correctness evidence",
+            ],
+        )
+
     exploratory_stats: dict[str, Any] = {}
     if exploratory:
         exp_results = []
@@ -185,17 +264,19 @@ def analyze(ctx: AnalyzerContext) -> Any:
                 exploratory_stats["budget_exhausted"] = True
                 break
             exp_results.append(_run_one(ctx, ctx.binary_path, tc, limits))
+        exp_ok = [r for r in exp_results if r["outcome"] == "run_ok"]
         exploratory_stats.update({
-            "ran": len(exp_results),
-            "passed": sum(1 for r in exp_results if r["passed"]),
+            "ran": len(exp_ok),
+            "passed": sum(1 for r in exp_ok if r["passed"]),
+            "infra_errors": len(exp_results) - len(exp_ok),
             "note": "exploratory only — excluded from the confirmed score",
             "results": exp_results,
         })
 
-    passed = sum(1 for r in per_test if r["passed"])
-    total = len(per_test)
+    passed = sum(1 for r in executed if r["passed"])
+    total = len(executed)
     score = passed / total if total else 0.0
-    failing = [r for r in per_test if not r["passed"]]
+    failing = [r for r in executed if not r["passed"]]
 
     findings: list[str] = []
     for r in failing:
@@ -215,8 +296,21 @@ def analyze(ctx: AnalyzerContext) -> Any:
             "the executed tests"
         )
         extra_limitations.append(
-            f"score reflects {len(per_test)} of {len(trusted)} trusted "
+            f"score reflects {len(executed)} of {len(trusted)} trusted "
             "tests; the remainder were not executed (execution budget)"
+        )
+    if infra_errors:
+        # D15: partial infrastructure failure — the affected tests are
+        # excluded from the score, never counted as student failures.
+        extra_warnings.append(
+            f"execution infrastructure failed for {len(infra_errors)} of "
+            f"{len(trusted)} trusted test(s); those tests were excluded "
+            "from scoring, not counted as failures"
+        )
+        extra_limitations.append(
+            f"score reflects {len(executed)} of {len(trusted)} trusted "
+            f"tests; {len(infra_errors)} could not be executed "
+            "(infrastructure failure)"
         )
 
     return build_result(
@@ -228,7 +322,8 @@ def analyze(ctx: AnalyzerContext) -> Any:
             "passed_trusted": passed,
             "total_trusted": total,
             "trusted_total": len(trusted),
-            "not_executed_trusted": len(trusted) - total,
+            "not_executed_trusted": len(trusted) - len(per_test),
+            "infra_errors": len(infra_errors),
             "pass_rate": score,
             "exploratory": exploratory_stats,
         },

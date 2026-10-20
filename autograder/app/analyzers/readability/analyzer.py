@@ -7,10 +7,14 @@ fully deterministic: mean of the dimension scores, quantized to the nearest
 0.05.
 
 Statuses:
-- ``completed`` — validated structured response received; score is the
-  quantized mean.
-- ``inconclusive`` — gateway unavailable/unreachable, or the model failed
-  structured validation after retries. Score is None with an explicit reason.
+- ``completed`` — validated structured response received covering ALL
+  rubric dimensions; score is the quantized mean.
+- ``inconclusive`` — gateway unavailable/unreachable, the model failed
+  structured validation after retries, or the review was empty /
+  missing rubric dimensions (D14: an empty review must never become a
+  manufactured ``completed`` 0.0, and a partial review must not be
+  silently averaged over whichever dimensions happened to arrive).
+  Score is None with an explicit reason.
 
 The LLM score is ADVISORY: it never overrides deterministic analyzer
 results. No score is ever produced without a validated structured response.
@@ -34,6 +38,16 @@ DEFAULTS = {
 }
 
 CriterionName = Literal["naming", "comments", "formatting", "structure", "safety_hygiene"]
+
+# Every dimension the rubric requires. A review missing any of these is
+# incomplete evidence — inconclusive, never averaged over a subset (D14).
+REQUIRED_DIMENSIONS: tuple[str, ...] = (
+    "naming",
+    "comments",
+    "formatting",
+    "structure",
+    "safety_hygiene",
+)
 
 
 class ReviewCriterion(StrictModel):
@@ -127,6 +141,33 @@ def analyze(ctx: AnalyzerContext) -> Any:
             warnings=[
                 "readability could not be assessed — the local model was "
                 "unreachable or did not return valid structured output"
+            ],
+        )
+
+    # D14: an empty review, or one missing rubric dimensions, is not
+    # evidence — it must not be scored (previously an empty review became
+    # a `completed` 0.0 and partial reviews were averaged over the
+    # dimensions that happened to arrive).
+    present = {c.name for c in review.criteria}
+    missing = [d for d in REQUIRED_DIMENSIONS if d not in present]
+    if not review.criteria or missing:
+        reason = (
+            "LLM review was empty (no rubric criteria returned)"
+            if not review.criteria
+            else "LLM review is missing rubric dimensions: " + ", ".join(missing)
+        )
+        return build_result(
+            metric=ctx.metric,
+            analyzer_id=ANALYZER_ID,
+            status="inconclusive",
+            diagnostics={
+                "reason": reason,
+                "dimensions_received": sorted(present),
+                "prompt_version": front_matter.get("version"),
+            },
+            warnings=[
+                "readability could not be assessed — the local model "
+                "returned an empty or incomplete review"
             ],
         )
 

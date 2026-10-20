@@ -5,9 +5,11 @@ sandbox, runs the trusted test inputs against the instrumented binary, and
 parses sanitizer diagnostics into findings. A clean run scores 1.0; each
 finding degrades per severity.
 
-If the sanitizer build fails on the host (toolchain lacks the runtime),
-the result is ``unsupported`` with an explicit reason — never a silent
-pass or fail.
+If the sanitizer build cannot run on the host (toolchain lacks the
+runtime), the result is ``unsupported`` with an explicit reason — never a
+silent pass or fail. A build failure caused by the *submission* (it does
+not compile under the sanitizer flags) is ``failed`` instead: that is the
+student's outcome, not a host limitation (D12).
 
 Sandbox interaction note: ASan reserves ~15 TB of *virtual* address space
 for its shadow memory and cannot start under a normal RLIMIT_AS cap, so
@@ -16,6 +18,11 @@ still bounded by ASan's own ``hard_rss_limit_mb`` (default 512 MB, via
 ASAN_OPTIONS), plus the usual wall-time timeout and process-group kill.
 This trade-off is explicit and documented — never enable unlimited address
 space for non-instrumented untrusted binaries.
+
+Leak checking note: ASAN_OPTIONS sets ``detect_leaks=0``, so memory leaks
+are NOT detected by this analyzer — only memory errors (ASan) and
+undefined behavior (UBSan) are. Both this and the unlimited address space
+are disclosed in every completed result's ``limitations`` (D12).
 """
 
 from __future__ import annotations
@@ -113,28 +120,42 @@ def analyze(ctx: AnalyzerContext) -> Any:
         )
 
     if not san_result.ok or not san_result.binary_path:
-        # Sanitizer runtime missing from the toolchain -> unsupported, honest.
         raw = (san_result.raw_stderr or "") + (san_result.raw_stdout or "")
         missing_runtime = any(
             tok in raw
             for tok in ("libasan", "libubsan", "unrecognized", "not found", "cannot find")
         )
-        reason = (
-            "sanitizer runtime unavailable in this toolchain"
-            if missing_runtime
-            else "sanitizer-instrumented build failed"
-        )
+        if missing_runtime:
+            # Sanitizer runtime missing from the toolchain -> unsupported, honest.
+            return build_result(
+                metric=ctx.metric,
+                analyzer_id=ANALYZER_ID,
+                status="unsupported",
+                diagnostics={
+                    "reason": "sanitizer runtime unavailable in this toolchain",
+                    "raw_tail": raw[-1500:],
+                },
+                limitations=[
+                    "memory-safety analysis requires a working "
+                    "-fsanitize=address,undefined toolchain"
+                ],
+            )
+        # D12: the toolchain works but the SUBMISSION does not compile
+        # under the sanitizer build — a student failure, not a host
+        # limitation. Never mislabel it `unsupported`.
         return build_result(
             metric=ctx.metric,
             analyzer_id=ANALYZER_ID,
-            status="unsupported",
+            status="failed",
             diagnostics={
-                "reason": reason,
+                "reason": "sanitizer-instrumented build failed: the "
+                          "submission does not compile under "
+                          "-fsanitize=address,undefined",
                 "raw_tail": raw[-1500:],
             },
             limitations=[
-                "memory-safety analysis requires a working "
-                "-fsanitize=address,undefined toolchain"
+                "memory safety could not be assessed because the "
+                "sanitizer-instrumented build of the submission failed"
             ],
         )
 
@@ -223,7 +244,17 @@ def analyze(ctx: AnalyzerContext) -> Any:
         findings=findings_text,
         limitations=[
             "sanitizers detect issues only on executed paths — clean runs do "
-            "not prove the absence of memory bugs"
+            "not prove the absence of memory bugs",
+            # D12 disclosures — both facts change what this result means.
+            "the address-space limit (RLIMIT_AS) is disabled for the "
+            "sanitizer runs: ASan reserves ~15 TB of virtual address space "
+            "for shadow memory and cannot start under a normal cap; "
+            "physical memory remains bounded by ASan's "
+            f"hard_rss_limit_mb={int(params['asan_rss_limit_mb'])} plus "
+            "wall-time and process limits",
+            "leak detection is disabled (ASAN_OPTIONS detect_leaks=0): "
+            "memory leaks are NOT checked — only memory errors "
+            "(AddressSanitizer) and undefined behavior (UBSan) are",
         ],
         execution_metadata={"sanitizer_binary_sha256": san_result.binary_sha256},
     )

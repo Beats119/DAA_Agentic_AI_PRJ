@@ -4,7 +4,10 @@ Two evidence legs:
 
 (a) STATIC (primary): loop-nesting depth and recursion detection over the
     source -> a conservative inferred Big-O class. This leg drives scoring
-    when ``rules.complexity.required`` is set.
+    when ``rules.complexity.required`` is set. When no required class is
+    known (rules and specification both silent), there is nothing to grade
+    the inference against: the result is ``inconclusive`` with the inferred
+    class recorded as information — never an invented score (D11).
 
 (b) TIMING (corroboration only): the binary is run on the trusted test
     inputs and wall times are recorded. Per the project spec (sec 13.6),
@@ -29,7 +32,6 @@ ANALYZER_ID = "complexity"
 
 DEFAULTS = {
     "mismatch_penalty": 0.5,
-    "score_when_no_requirement": 1.0,
     "slow_test_warn_s": 1.0,
     "score_floor": 0.0,
 }
@@ -214,22 +216,6 @@ def analyze(ctx: AnalyzerContext) -> Any:
         )
 
     required = ctx.rules.complexity.required
-    findings: list[str] = []
-    if required:
-        if _normalize_class(required) == _normalize_class(inferred):
-            score = 1.0
-            findings.append(f"inferred {inferred} matches required {required}")
-        else:
-            score = max(float(params["score_floor"]), 1.0 - float(params["mismatch_penalty"]))
-            findings.append(
-                f"inferred {inferred} does not match required {required}"
-            )
-    else:
-        score = float(params["score_when_no_requirement"])
-        findings.append(
-            f"inferred {inferred}; no complexity requirement set in rules "
-            "(informational score)"
-        )
 
     ev_id = ctx.add_evidence(
         ANALYZER_ID,
@@ -243,20 +229,57 @@ def analyze(ctx: AnalyzerContext) -> Any:
             "timing_caveat": timing_note,
         },
         confidence=0.8,
+        affects_grade=bool(required),
     )
+    measurements = {
+        "inferred_class": inferred,
+        "required_class": required,
+        "max_loop_nesting": nesting,
+        "recursion_detected": recursive,
+        "timing_samples": len(timing),
+    }
+
+    if not required:
+        # D11: no required class anywhere (rules + specification silent) —
+        # the inferred class is information, not a grade. Awarding a score
+        # here would manufacture marks from an unchecked heuristic.
+        return build_result(
+            metric=ctx.metric,
+            analyzer_id=ANALYZER_ID,
+            status="inconclusive",
+            measurements=measurements,
+            evidence_refs=[ev_id],
+            diagnostics={
+                "reason": "no required complexity class specified; "
+                          "inferred class recorded but not graded"
+            },
+            findings=[
+                f"inferred {inferred}; no complexity requirement set in "
+                "rules — not graded"
+            ],
+            warnings=timing_warnings + [timing_note],
+            limitations=[
+                "no required complexity class specified",
+                timing_note,
+            ],
+        )
+
+    findings: list[str] = []
+    if _normalize_class(required) == _normalize_class(inferred):
+        score = 1.0
+        findings.append(f"inferred {inferred} matches required {required}")
+    else:
+        score = max(float(params["score_floor"]), 1.0 - float(params["mismatch_penalty"]))
+        findings.append(
+            f"inferred {inferred} does not match required {required}"
+        )
 
     return build_result(
         metric=ctx.metric,
         analyzer_id=ANALYZER_ID,
         status="completed",
         score=score,
-        measurements={
-            "inferred_class": inferred,
-            "required_class": required,
-            "max_loop_nesting": nesting,
-            "recursion_detected": recursive,
-            "timing_samples": len(timing),
-        },
+        measurements=measurements,
         evidence_refs=[ev_id],
         findings=findings,
         warnings=timing_warnings,
