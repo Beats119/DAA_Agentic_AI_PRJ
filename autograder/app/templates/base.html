@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}AutoGrader{% endblock %}</title>
+<style>
+:root{
+  --bg:#0f1420; --panel:#171e2e; --panel2:#1e2740; --line:#2b3654;
+  --fg:#e8edf7; --muted:#93a0bd; --accent:#5aa2ff; --accent2:#7ee0b8;
+  --warn:#ffcf6b; --bad:#ff7a7a; --ok:#7ee0b8;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+header.top{background:var(--panel);border-bottom:1px solid var(--line);padding:0 24px;display:flex;align-items:center;gap:28px;height:60px;position:sticky;top:0;z-index:10}
+header.top .logo{font-weight:800;font-size:18px;letter-spacing:.5px}
+header.top .logo span{color:var(--accent2)}
+header.top nav{display:flex;gap:18px}
+header.top nav a{color:var(--muted);font-weight:600}
+header.top nav a.active,header.top nav a:hover{color:var(--fg)}
+main{max-width:1080px;margin:0 auto;padding:28px 24px 64px}
+h2{margin:.2em 0 .6em} h3{margin:1.6em 0 .6em;color:var(--accent2)} h4{margin:1.2em 0 .4em;color:var(--muted)}
+.muted{color:var(--muted)} .small{font-size:12.5px} .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+code{background:var(--panel2);padding:1px 6px;border-radius:4px}
+table{width:100%;border-collapse:collapse;margin:.6em 0;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+thead th{background:var(--panel2);color:var(--muted);font-size:12.5px;text-transform:uppercase;letter-spacing:.4px}
+tfoot td{background:var(--panel2)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+pre{background:#0b0f1a;border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font-size:13px;line-height:1.5}
+pre.source{max-height:480px}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.badge-completed,.badge-passed{background:rgba(126,224,184,.15);color:var(--ok)}
+.badge-completed_with_warnings,.badge-provisional{background:rgba(255,207,107,.15);color:var(--warn)}
+.badge-failed,.badge-incomplete,.badge-rejected{background:rgba(255,122,122,.15);color:var(--bad)}
+.badge-inconclusive,.badge-queued,.badge-running{background:rgba(90,162,255,.15);color:var(--accent)}
+.grade-hero{text-align:right}
+.grade-value{font-size:52px;font-weight:800;line-height:1;color:var(--accent2)}
+.grade-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
+.report-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.hashes{display:flex;gap:20px;flex-wrap:wrap;margin:.8em 0;color:var(--muted);font-size:13px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+.chips{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:4px 14px;font-size:13px}
+.chip b{color:var(--accent2)}
+.btn{display:inline-block;background:var(--accent);color:#081120;border:0;border-radius:8px;padding:10px 20px;font-weight:700;font-size:14px;cursor:pointer}
+.btn:hover{filter:brightness(1.1);text-decoration:none}
+.btn-ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+label{display:block;margin:12px 0 4px;font-weight:600}
+input[type=text],input[type=file],select,textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:10px 12px;font-size:14px}
+input[type=file]{padding:8px}
+ul.warn li{margin-bottom:6px}
+ul.warn li::marker{color:var(--warn)}
+.flash{background:rgba(255,207,107,.12);border:1px solid var(--warn);border-radius:8px;padding:10px 14px;margin:12px 0}
+.flash.err{background:rgba(255,122,122,.12);border-color:var(--bad)}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:sp 1s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+footer{color:var(--muted);font-size:12.5px;text-align:center;padding:24px;border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="logo">Auto<span>Grader</span></div>
+  <nav>
+    <a href="/" class="{% if active=='dash' %}active{% endif %}">Dashboard</a>
+    <a href="/new" class="{% if active=='new' %}active{% endif %}">New evaluation</a>
+    <a href="/rules" class="{% if active=='rules' %}active{% endif %}">Rules</a>
+    <a href="/operations" class="{% if active=='ops' %}active{% endif %}">Operations</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+<footer>AutoGrader · local-only evaluation · Ollama runtime · no external inference</footer>
+<script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

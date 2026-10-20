@@ -124,7 +124,8 @@ def test_loopback_allowed():
 
 def test_unreachable_is_explicit(mock_ollama):
     url, server = mock_ollama
-    server.shutdown()  # kill it; the port is now dead
+    server.shutdown()  # stop the serve loop...
+    server.server_close()  # ...and close the listening socket: the port is now truly dead
     client = OllamaClient(url, max_retries=0)
     with pytest.raises(OllamaUnreachable, match="ollama serve"):
         client.generate("hi", model="llama3.1")

@@ -19,9 +19,12 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 
 
@@ -102,6 +105,17 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _synchronized(method):
+    """Serialize DB access across request and evaluation threads (RLock)."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 @dataclass(frozen=True)
 class RunRecord:
     """Metadata snapshot of one evaluation run."""
@@ -132,16 +146,22 @@ class RunStore:
     def __init__(self, base_dir: str | Path, db_name: str = "autograder.db") -> None:
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.artifact_root = self.base_dir / "artifacts" / "runs"
+        self.artifact_root = self.base_dir / "runs"
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.base_dir / db_name
-        self._conn = sqlite3.connect(str(self.db_path))
+        # check_same_thread=False + a re-entrant lock: the store is shared
+        # between request threads (FastAPI threadpool) and background
+        # evaluation threads. All DB access is serialized by the lock.
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._lock = threading.RLock()
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
 
     # -- runs -----------------------------------------------------------
+    @_synchronized
     def create_run(
         self,
         submission_hash: str,
@@ -164,12 +184,14 @@ class RunStore:
             raise PersistenceError(f"run {rid} already exists") from exc
         return self.get_run(rid)
 
+    @_synchronized
     def get_run(self, run_id: str) -> RunRecord:
         row = self._conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise RunNotFoundError(f"no run {run_id}")
         return RunRecord(**{k: row[k] for k in row.keys()})
 
+    @_synchronized
     def list_runs(self, state: str | None = None, limit: int = 100) -> list[RunRecord]:
         if state is None:
             rows = self._conn.execute(
@@ -182,6 +204,7 @@ class RunStore:
             ).fetchall()
         return [RunRecord(**{k: r[k] for k in r.keys()}) for r in rows]
 
+    @_synchronized
     def transition_run(self, run_id: str, to_state: str) -> RunRecord:
         """Move a run to a new state; rejects invalid jumps and terminal edits."""
         record = self.get_run(run_id)
@@ -202,6 +225,7 @@ class RunStore:
         self._conn.commit()
         return self.get_run(run_id)
 
+    @_synchronized
     def set_grade(self, run_id: str, grade: str | None) -> RunRecord:
         record = self.get_run(run_id)
         if record.state in TERMINAL_STATES:
@@ -214,6 +238,7 @@ class RunStore:
         return self.get_run(run_id)
 
     # -- rule versions / assignments ------------------------------------
+    @_synchronized
     def record_rule_version(self, rules_hash: str, version: str) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO rule_versions (hash, version, created_at)"
@@ -222,12 +247,14 @@ class RunStore:
         )
         self._conn.commit()
 
+    @_synchronized
     def get_rule_version(self, rules_hash: str) -> str | None:
         row = self._conn.execute(
             "SELECT version FROM rule_versions WHERE hash = ?", (rules_hash,)
         ).fetchone()
         return row["version"] if row else None
 
+    @_synchronized
     def record_assignment(self, assignment_id: str, spec_hash: str, source_path: str) -> None:
         self._conn.execute(
             "INSERT OR IGNORE INTO assignments (id, spec_hash, source_path, created_at)"
@@ -254,6 +281,7 @@ class RunStore:
             raise PersistenceError(f"unsafe artifact name: {name!r}")
         return name
 
+    @_synchronized
     def write_artifact(self, run_id: str, name: str, data: bytes) -> ArtifactRecord:
         """Atomically store an artifact; refuses overwrites and finalized runs."""
         import hashlib
@@ -287,6 +315,7 @@ class RunStore:
         self._conn.commit()
         return ArtifactRecord(run_id, safe, str(target), digest, now)
 
+    @_synchronized
     def read_artifact(self, run_id: str, name: str) -> bytes:
         row = self._conn.execute(
             "SELECT path FROM artifacts WHERE run_id = ? AND name = ?",
@@ -296,6 +325,7 @@ class RunStore:
             raise PersistenceError(f"no artifact {name!r} for run {run_id}")
         return Path(row["path"]).read_bytes()
 
+    @_synchronized
     def list_artifacts(self, run_id: str) -> list[ArtifactRecord]:
         self.get_run(run_id)  # raises if unknown
         rows = self._conn.execute(
@@ -304,5 +334,6 @@ class RunStore:
         ).fetchall()
         return [ArtifactRecord(**{k: r[k] for k in r.keys()}) for r in rows]
 
+    @_synchronized
     def close(self) -> None:
         self._conn.close()

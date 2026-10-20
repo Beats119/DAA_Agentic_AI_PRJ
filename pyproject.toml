@@ -17,6 +17,7 @@ dependencies = [
     "pymupdf",
     "httpx",
     "pyyaml",
+    "python-multipart>=0.0.18",
     "pytest",
 ]
 

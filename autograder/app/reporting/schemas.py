@@ -47,14 +47,19 @@ def validate_report(data: Report | dict[str, Any]) -> Report:
             f"engine POLICY_VERSION {POLICY_VERSION!r}"
         )
 
-    for m in report.metrics:
-        if m.score is not None:
-            want = 100.0 * m.weight * m.score
-            if abs(m.contribution - want) > _CONTRIB_TOL:
-                raise ReportError(
-                    f"metric {m.name!r}: contribution {m.contribution} != "
-                    f"100 * weight * score = {want}"
-                )
+    # Per-metric reconciliation applies only when a grade was computed.
+    # For incomplete/failed runs (grade None) the scoring engine keeps the
+    # measured per-metric scores as evidence but zeroes contributions (there
+    # is no grade to contribute to); that is honest, not a mismatch.
+    if report.grade is not None:
+        for m in report.metrics:
+            if m.score is not None:
+                want = 100.0 * m.weight * m.score
+                if abs(m.contribution - want) > _CONTRIB_TOL:
+                    raise ReportError(
+                        f"metric {m.name!r}: contribution {m.contribution} != "
+                        f"100 * weight * score = {want}"
+                    )
 
     if report.grade is not None:
         total = sum(m.contribution for m in report.metrics)
