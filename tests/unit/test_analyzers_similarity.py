@@ -11,7 +11,6 @@ from conftest import FIXTURES_CORPUS, make_analyzer_ctx
 
 from autograder.app.analyzers.similarity import analyzer as similarity
 from autograder.app.analyzers.similarity.analyzer import (
-    REVIEW_DISCLAIMER,
     jaccard,
 )
 

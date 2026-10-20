@@ -25,7 +25,7 @@ Liveness + dependency honesty. Returns:
             "error": "cannot reach Ollama at ... (Connection refused)"},
  "sandbox": {"resource_limits": true, "network_namespace": true,
              "seccomp": true, "landlock_abi": 8, "compiler": "/usr/bin/gcc", ...},
- "versions": {"scoring_policy": "1.1", "sandbox": "sandbox-2.0",
+ "versions": {"scoring_policy": "1.1", "sandbox": "sandbox-2.1",
               "python": "3.12.3", "app": "0.1.0"}}
 ```
 

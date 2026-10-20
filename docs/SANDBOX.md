@@ -18,7 +18,7 @@ falls back to defaults.
 | Setting | Default | Meaning |
 |---|---|---|
 | `mandatory` | `resource_limits`, `landlock_fs`, `network_namespace`, `seccomp_filter`, `no_new_privs` | Capabilities that MUST be established for every run, or the run is refused |
-| `sandbox_uid` / `sandbox_gid` | `65534` / `65534` (`nobody`/`nogroup`) | Dedicated unprivileged identity the child drops to when the app runs as root |
+| `sandbox_uid` / `sandbox_gid` | `65534` / `65534` (`nobody`/`nogroup`) | Dedicated unprivileged identity the child drops to when the app runs as root (the `root-setuid` strategy; see Launcher design) |
 | `drop_privileges_when_root` | `true` | Perform the identity drop when euid == 0 |
 | `fs_read_paths` | `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` | The ONLY host directories readable/executable by default (runtime libraries + loader). Never `/`, never `/etc`, never a home directory |
 | `seccomp_profile` | `runtime` | Default syscall profile (`runtime` \| `compiler`) |
@@ -52,22 +52,45 @@ with cwd set to the run directory. The launcher then, in order:
 0. **Pre-opens every Landlock rule fd** (`O_PATH`) while still fully
    privileged — after the identity drop, path-based opens could fail on
    ancestors the sandbox uid cannot traverse; open fds are immune.
-1. `unshare(CLONE_NEWNET)` — network namespace (mandatory).
+1. Namespace + identity setup — one of two strategies, chosen from the
+   launcher's own euid:
+   - **`root-setuid`** (euid == 0): `unshare(CLONE_NEWNET)` directly —
+     root may create a network namespace outright. The identity drop
+     itself happens at step 3.
+   - **`rootless-userns`** (any other euid — the normal deployment,
+     e.g. the instructor's own account on WSL): a bare `CLONE_NEWNET`
+     unshare is EPERM unprivileged, so the launcher calls
+     `unshare(CLONE_NEWUSER | CLONE_NEWNET)` — one call creating both,
+     the netns owned by the new user namespace, which is what makes it
+     creatable without root. It then writes
+     `/proc/self/setgroups` = `deny` (ignored only if the file does
+     not exist), `uid_map` = `0 <euid> 1`, `gid_map` = `0 <egid> 1`,
+     with the outer ids captured BEFORE the unshare (afterwards
+     `getuid()` reports the overflow uid). Inside the namespace the
+     child is uid 0; on the host it remains the unprivileged app user.
+     Any failure in this sequence is `failed_step="user_namespace"`,
+     exit 125 — fail closed, never a silent fallback to host
+     networking.
 2. rlimits: `RLIMIT_CPU`, `RLIMIT_AS`, `RLIMIT_FSIZE`, `RLIMIT_NPROC`,
    `RLIMIT_STACK`, `RLIMIT_CORE=0`.
-3. Identity drop (when euid == 0 and policy allows): `setgroups([])`,
-   `setgid(65534)`, `setuid(65534)`, then verifies `getuid() != 0`.
-   Dropping to a real unprivileged uid is also what makes
-   `RLIMIT_NPROC` enforceable (it is not enforced for uid 0). When the
-   app runs unprivileged, the child keeps the invoking uid and the
-   status report says `uid_dropped=false, reason="not root"`.
+3. Identity drop — root-setuid strategy only, and when policy allows:
+   `setgroups([])`, `setgid(65534)`, `setuid(65534)`, then verifies
+   `getuid() != 0`. Dropping to a real unprivileged uid is also what
+   makes `RLIMIT_NPROC` enforceable (it is not enforced for uid 0).
+   The rootless strategy never setuids (only the one mapped uid exists
+   inside its namespace); its status reports `uid` as the OUTER (host)
+   uid — never the namespace-inner 0, which would falsely read as
+   "ran as host root" — plus `uid_inner: 0`, `uid_outer: <euid>`,
+   `strategy`, and `uid_dropped=false` with the reason stating the
+   design.
 4. `prctl(PR_SET_NO_NEW_PRIVS, 1)`.
 5. Landlock: ruleset handling **all** filesystem access rights the
    kernel mediates; only the allowlist below gets rules (mandatory).
 6. Seccomp: installs the profile's BPF allowlist (mandatory).
 7. Writes ONE JSON status line to the status pipe —
    `{ok, netns, landlock, seccomp, resource_limits, no_new_privs, uid,
-   uid_dropped}` — then `execve`s the target.
+   uid_dropped, strategy}` (plus `uid_inner`/`uid_outer` on the
+   rootless strategy) — then `execve`s the target.
 
 Any mandatory failure writes `{ok: false, failed_step, error}` and exits
 **125** before exec. The parent reads the status line BEFORE pumping I/O;
@@ -77,7 +100,8 @@ mandatory policy raises `SandboxError` and kills the process group.
 actuals, not probes:
 
 `resource_limits`, `process_group_kill`, `network_isolated`,
-`landlock_fs`, `seccomp_filter`, `uid`, `uid_dropped`, `temp_dir`.
+`landlock_fs`, `seccomp_filter`, `uid`, `uid_dropped`,
+`isolation_strategy`, `temp_dir`.
 
 ## Filesystem allowlist (Landlock, default-deny)
 
@@ -110,7 +134,16 @@ permission on ancestors of granted paths, and ensures granted read files
 are readable. Compilation additionally *stages* the source into the
 output directory (with `-ffile-prefix-map` so diagnostics keep the
 original path), because a root-launched compiler child running as
-`nobody` may be unable to read the original source path at all.
+`nobody` may be unable to read the original source path at all. Under
+the rootless strategy none of this chowning happens — it is neither
+possible (unprivileged) nor needed: the executor's DAC preparation is
+gated on the root-setuid strategy exactly, the run directory stays
+owned by the app user, and the child (whose outer uid IS the app user)
+writes it directly. In that configuration Landlock is the ONLY barrier
+between the child and the app user's own files — DAC would allow the
+reads, since the child shares the app uid — which is precisely what
+`tests/security/test_nonroot_identity.py` proves with a planted,
+owner-readable secret.
 
 ## Seccomp profiles (`sandbox/seccomp.py`)
 
@@ -158,8 +191,16 @@ on clean input — all under the runtime profile.
 
 ```
 $ python -m autograder.app.sandbox.capabilities
-user_namespaces:   false  (not used by design)
-network_namespace: true
+user_namespaces:   true   (the rootless sequence itself — CLONE_NEWUSER|
+                           CLONE_NEWNET + setgroups/uid_map/gid_map —
+                           probe-run in a forked child; the ids are
+                           captured BEFORE the unshare. Run unprivileged
+                           on a host that restricts userns creation (see
+                           the AppArmor note below) this honestly reports
+                           false, and the executor then refuses to run)
+network_namespace: true   (the probe mirrors the launcher strategy for
+                           the current euid: root → bare unshare probe;
+                           unprivileged → the rootless sequence)
 seccomp:           true   (the REAL runtime filter was installed in a probe
                            child and socket() was denied with EPERM while
                            getpid() still worked — mechanism-presence alone
@@ -185,11 +226,34 @@ do not authorize execution.
 - Linux with Landlock enabled, ABI ≥ 1 (any kernel ≥ 5.13 with
   `CONFIG_SECURITY_LANDLOCK=y`). The real ABI is probed, not assumed —
   this machine's kernel reports ABI **8**.
-- Network namespaces creatable by the launching user (root, or
-  `CAP_SYS_ADMIN`, or unprivileged netns where enabled).
+- Network namespaces creatable by the launching user: directly as
+  root, or unprivileged via the rootless user-namespace strategy where
+  the host permits it (see the platform note below).
 - x86_64 (seccomp tables are architecture-specific).
 - If any of these are missing, `ensure_available` raises
   `SandboxUnavailable` and NOTHING executes — there is no degraded mode.
+
+### Platform note: hosts that restrict unprivileged user namespaces
+
+The rootless strategy depends on unprivileged user-namespace creation.
+Some Ubuntu installs restrict exactly that via AppArmor:
+`kernel.apparmor_restrict_unprivileged_userns=1`. On such a host an
+unprivileged launcher cannot complete the rootless sequence (it fails
+closed with `failed_step="user_namespace"`, exit 125) and therefore
+cannot create the mandatory network namespace at all. As the machine
+owner you have two remedies:
+
+- `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` — allow
+  unprivileged user namespaces, so the rootless strategy applies; or
+- run AutoGrader as root (or another privileged account), so the
+  root-setuid strategy applies instead.
+
+Without one of these, the sandbox stays fail-closed and evaluations
+are refused — it is never silently downgraded to running student code
+with host networking or without the namespace boundary. (This is the
+measured behavior on the development VM: as uid 65534 the capability
+probe reports `user_namespaces: false`, `network_namespace: false`,
+and the regression test takes its REFUSED branch there.)
 
 ## Fail-closed behavior (summary)
 
@@ -218,19 +282,29 @@ do not authorize execution.
   scope for a userspace sandbox (this is the standard seccomp caveat).
 - **Side channels** (timing, `/proc` existence checks): not mitigated.
   Runs are sequential per worker in the orchestrator.
-- **Identity when unprivileged**: when the app itself runs as a normal
-  user there is no dedicated sandbox uid to drop to; the child keeps the
-  invoking uid, contained by Landlock + seccomp + netns. Running the app
-  as root on the grading host is what enables the `nobody` drop.
+- **Identity when unprivileged**: when the app runs as a normal user
+  there is no setuid drop; instead the child runs in its own user
+  namespace (uid 0 inside, the app uid outside). Its HOST uid is still
+  the app user's, so the read barrier for the app user's own files is
+  Landlock's allowlist, not DAC — proven by
+  `tests/security/test_nonroot_identity.py`, which plants an
+  owner-readable secret in a directory owned by the app identity and
+  asserts the marker never appears (executed branch: the read is
+  denied by Landlock; hosts that forbid userns creation: the run is
+  refused outright). Running the app as root remains what enables the
+  `nobody` drop.
 
 ## WSL2 (target machine) expectations
 
-Run `python -m autograder.app.sandbox.capabilities` on the target host.
-Required: `resource_limits: true`, `compiler: <gcc path>`,
-`landlock_abi: >= 1` (real value, e.g. 5–6 on recent WSL2 kernels),
-`network_namespace: true`, `seccomp: true`. If any is missing the
-executor refuses to run untrusted code — check Landlock is enabled in
-the kernel and that the app runs with permission to create namespaces.
+Run `python -m autograder.app.sandbox.capabilities` on the target host
+**as the user the app will run as** — the probes are strategy-aware and
+euid-dependent. Required: `resource_limits: true`,
+`compiler: <gcc path>`, `landlock_abi: >= 1` (real value, e.g. 5–6 on
+recent WSL2 kernels), `network_namespace: true`, `seccomp: true`. For
+an unprivileged user, `network_namespace: true` is obtained via the
+rootless user-namespace path; if it reports false there, see the
+AppArmor platform note above for the owner's remedies. If any required
+capability is missing the executor refuses to run untrusted code.
 
 ## Running the adversarial tests
 
@@ -238,10 +312,12 @@ the kernel and that the app runs with permission to create namespaces.
 pytest tests/security -q
 ```
 
-Seventeen modules, all with real hostile/observing binaries, no mocks of
+Eighteen modules, all with real hostile/observing binaries, no mocks of
 enforcement: timeout + process-tree kill, memory bomb, output flood,
 fork bomb, filesystem escape (writes), **read isolation** (D1),
-**symlink escape**, **identity drop** (D2), **mandatory networking**
+**symlink escape**, **identity drop** (D2), **non-root identity**
+(rootless userns: planted-secret read isolation, or fail-closed refusal
+where the host forbids userns), **mandatory networking**
 (loopback + external connects, D3), **seccomp EPERM proofs** (D4),
 **policy fail-closed** (bogus mandate, launcher-level refusal with
 marker-file proof), compiler failures, crash signals, capabilities

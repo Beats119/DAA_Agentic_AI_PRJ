@@ -86,14 +86,45 @@ See [docs/OLLAMA.md](docs/OLLAMA.md) for per-task model config and GPU notes.
 
 ## Sandbox identity & policy
 
-Student code never runs as the user who started the app **when the app
-runs as root**: the sandbox launcher drops privileges to a dedicated
-unprivileged identity before `exec`. By default that identity is
-`nobody`/`nogroup` (uid/gid 65534). When the app runs as a normal user,
-the child keeps that user's uid (there is no other uid to drop to
-without root) and is contained by Landlock + seccomp + network
-namespace; the enforcement report in every run states which case
-applied (`uid_dropped: true/false`).
+Student code never runs with the full identity of the user who started
+the app. The sandbox launcher picks one of two identity strategies, and
+every run's enforcement report states which one applied
+(`isolation_strategy`, alongside `uid` and `uid_dropped`):
+
+- **App runs as root → `root-setuid`.** The child drops privileges to a
+  dedicated unprivileged identity before `exec`. By default that
+  identity is `nobody`/`nogroup` (uid/gid 65534).
+- **App runs as a normal user → `rootless-userns`** — the usual
+  deployment (e.g. your own account on WSL), and fully supported. The
+  launcher creates a user namespace together with the network namespace
+  and maps the child to uid 0 *inside* it; on the host the child
+  remains your own unprivileged uid, contained by Landlock + seccomp +
+  the namespace. Landlock — not DAC — is the barrier between the child
+  and your files, since the child shares your host uid. No root, sudo,
+  setuid helper, or Docker is required.
+
+**Non-root deployment requirement:** the host must permit unprivileged
+user-namespace creation (most distributions do by default). Some
+Ubuntu installs restrict it via AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns=1`); on such a host an
+unprivileged AutoGrader cannot establish the mandatory network
+namespace and refuses every evaluation — fail closed, never a silent
+fallback to uncontained execution. As the machine owner, either relax
+the restriction:
+
+```bash
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+or run the app as root / another privileged account so the root-setuid
+strategy applies. Check what your host allows, **as the user the app
+will run as**, before deploying:
+
+```bash
+python -m autograder.app.sandbox.capabilities
+# user_namespaces and network_namespace must reflect the strategy
+# available to that user (see the startup capability check below)
+```
 
 For a root-run deployment (e.g. a systemd service) you can provision a
 dedicated identity instead of `nobody`:
@@ -116,8 +147,9 @@ export AUTOGRADER_SANDBOX_POLICY=/path/to/sandbox-policy.json
 The same file can adjust the other `SandboxPolicy` fields (`mandatory`,
 `fs_read_paths`, `seccomp_profile`, `drop_privileges_when_root`) — see
 `autograder/app/sandbox/policy.py`. The application itself never needs
-root for normal operation; root only matters because the *child* then
-has something to drop from.
+root for normal operation; running as root only selects the setuid
+strategy (with the dedicated identity above) instead of the rootless
+one.
 
 **Startup capability check.** The sandbox probes the host before any
 student code runs:

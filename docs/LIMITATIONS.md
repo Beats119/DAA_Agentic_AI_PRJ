@@ -117,19 +117,26 @@ run".
 ## 9. Privilege drop exists only when the app itself runs as root
 
 **Unreliable-verdict scenario:** on a normal (non-root) deployment,
-sandboxed student code runs as the same uid as the app — Landlock,
-seccomp, and the network namespace still contain it (and are tested in
-that configuration), but there is no second uid boundary, so anything
-the app user can read *through a sandbox escape* is exposed.
-**Why:** an unprivileged process cannot setuid to another user. The
-dedicated-identity drop (uid/gid 65534 by default, configurable via
-`AUTOGRADER_SANDBOX_POLICY`) applies when the app runs as root, which
-is the configuration the identity tests exercise.
+sandboxed student code runs with the same HOST uid as the app — inside
+its own user namespace (uid 0 inside, the app uid outside), with
+Landlock, seccomp, and the network namespace containing it (tested in
+exactly that configuration by
+`tests/security/test_nonroot_identity.py`). But there is no second
+HOST uid, so anything the app user can read *through a sandbox
+escape* is exposed.
+**Why:** an unprivileged process cannot setuid to another user; the
+user-namespace mapping is the strongest host-identity change available
+to it. The dedicated-identity setuid drop (uid/gid 65534 by default,
+configurable via `AUTOGRADER_SANDBOX_POLICY`) applies when the app
+runs as root, which is the configuration the D2 identity test
+exercises.
 **Mitigation:** run the app as root in a dedicated VM/container if the
-two-uid boundary matters, or accept the single-uid model with the
-Landlock allowlist as the read barrier. The enforcement report always
-states the actual child uid and whether a drop happened — it never
-claims a drop that didn't occur.
+two-host-uid boundary matters, or accept the namespace model with the
+Landlock allowlist as the read barrier (the planted-secret regression
+test proves that barrier in the non-root configuration — and proves
+the run is refused outright on hosts that forbid user namespaces).
+The enforcement report always states the strategy and the actual
+(outer) child uid — it never claims a drop that didn't occur.
 
 ## 10. Real-model behavior is unverified (generation quality, variance, reviews)
 

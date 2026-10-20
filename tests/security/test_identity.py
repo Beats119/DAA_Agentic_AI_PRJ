@@ -3,8 +3,12 @@
 When the application runs as root, the launcher drops the child to the
 policy's dedicated sandbox identity (default nobody/65534) before exec —
 which is also what makes RLIMIT_NPROC enforceable. When the application
-runs unprivileged, the child keeps the invoking uid (and the report
-says so honestly, via ``uid_dropped=False``).
+runs unprivileged (sandbox-2.1 rootless strategy), the child is uid 0
+inside its OWN user namespace — an identity that exists only inside
+that namespace and maps back to the unprivileged app uid on the host;
+the enforcement report carries the OUTER uid and
+``isolation_strategy == "rootless-userns"`` (and ``uid_dropped=False``:
+no setuid happened, or was needed).
 """
 
 import os
@@ -35,7 +39,12 @@ def test_child_identity(executor, c_binary):
         # The enforcement report is the launcher's actual: same story.
         assert result.enforcement.uid == 65534
         assert result.enforcement.uid_dropped is True
+        assert result.enforcement.isolation_strategy == "root-setuid"
     else:
-        assert uid == os.getuid()
+        # Rootless strategy: the program observes its namespace-INNER
+        # uid (0), while the enforcement report carries the OUTER uid —
+        # the app user's real, unprivileged host identity.
+        assert result.enforcement.isolation_strategy == "rootless-userns"
+        assert uid == 0
         assert result.enforcement.uid == os.getuid()
         assert result.enforcement.uid_dropped is False

@@ -7,7 +7,6 @@ and fully deterministic.
 
 from datetime import datetime, timezone
 
-import pytest
 
 from conftest import make_analyzer_ctx
 
@@ -109,3 +108,32 @@ def test_gateway_failure_is_inconclusive(sandbox_executor, tmp_path):
     assert result.status == "inconclusive"
     assert result.score is None
     assert "connection refused" in result.diagnostics["detail"]
+
+
+def test_empty_review_is_inconclusive_not_zero(sandbox_executor, tmp_path):
+    # D14: an empty review used to validate and score a `completed` 0.0 —
+    # a manufactured zero from no evidence. It must be inconclusive.
+    empty = CodeReview(criteria=[], suggestions=[], confidence=0.0, overall_note="")
+    ctx = make_analyzer_ctx(
+        sandbox_executor, tmp_path, "readability", "correct_add.c",
+        gateway=MockGateway(empty),
+    )
+    result = readability.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+    assert "empty" in result.diagnostics["reason"]
+
+
+def test_partial_review_is_inconclusive_not_averaged(sandbox_executor, tmp_path):
+    # D14: a review missing rubric dimensions must not be silently
+    # averaged over the dimensions that arrived.
+    partial = _review({"naming": 0.9, "comments": 0.9, "formatting": 0.9})
+    ctx = make_analyzer_ctx(
+        sandbox_executor, tmp_path, "readability", "correct_add.c",
+        gateway=MockGateway(partial),
+    )
+    result = readability.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+    assert "structure" in result.diagnostics["reason"]
+    assert "safety_hygiene" in result.diagnostics["reason"]
