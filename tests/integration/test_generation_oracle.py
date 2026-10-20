@@ -217,3 +217,175 @@ def test_reference_oracle_honest_without_executor():
     )
     assert verdict.status == "inconclusive"
     assert "no execution backend wired" in verdict.provenance.detail
+
+
+# ---------------------------------------------------------------------------
+# D8/D9: reference validation coverage + no trust without comparison
+# ---------------------------------------------------------------------------
+
+def _sum_executor(stdin_text):
+    try:
+        a, b = (int(x) for x in stdin_text.split())
+    except Exception:
+        return None
+    return f"{a + b}\n"
+
+
+def _tc(id_, input_, expected):
+    return candidate_to_testcase(CandidateModel(
+        id=id_, input=input_, input_category="normal", rationale="r",
+        requirement_refs=["R1"], expected_value=expected))
+
+
+def test_reference_validated_compare_trusted_and_rejected():
+    """D9: with a validated reference, the ctx-executor path COMPARES —
+    agreement -> trusted, contradiction -> rejected (with both outputs)."""
+    from autograder.app.testing.oracle.strategies import ReferenceSolutionOracle
+
+    oracle = ReferenceSolutionOracle("int main(){/* adds */}")
+    prep = oracle.prepare(
+        lambda src: {"ok": True, "binary": "/tmp/ref"}, _spec(),
+        run_reference=lambda b, s: _sum_executor(s))
+    assert prep["ready"] is True
+    assert prep["validated"] is True
+    assert prep["examples_total"] == 1 and prep["examples_reproduced"] == 1
+
+    ctx = OracleContext(reference_executor=_sum_executor)
+    v = oracle.assess(_tc("T1", "4 5\n", "9\n"), _spec(), ctx)
+    assert v.status == "trusted"
+    assert v.evidence["reference_stdout"] == "9\n"
+
+    v2 = oracle.assess(_tc("T2", "4 5\n", "10\n"), _spec(), ctx)
+    assert v2.status == "rejected"
+    assert v2.evidence["reference_stdout"] == "9\n"
+    assert v2.evidence["candidate_expected"] == "10\n"
+
+
+def test_reference_unvalidated_no_examples_capped_provisional():
+    """D8: spec with NO examples -> reference compiles but is unvalidated;
+    agreement is capped at provisional, disagreement is inconclusive."""
+    from autograder.app.testing.oracle.strategies import ReferenceSolutionOracle
+
+    spec = Specification(requirements=_spec().requirements, examples=[])
+    oracle = ReferenceSolutionOracle("int main(){/* adds */}")
+    prep = oracle.prepare(
+        lambda src: {"ok": True, "binary": "/tmp/ref"}, spec,
+        run_reference=lambda b, s: _sum_executor(s))
+    assert prep["ready"] is True
+    assert prep["validated"] is False
+    assert prep["examples_total"] == 0 and prep["examples_reproduced"] == 0
+
+    ctx = OracleContext(reference_executor=_sum_executor)
+    v = oracle.assess(_tc("T1", "4 5\n", "9\n"), spec, ctx)
+    assert v.status == "provisional"
+    assert "reference unvalidated" in v.provenance.detail
+    assert "no specification examples" in v.provenance.detail
+    assert v.evidence["limitation"].startswith("reference unvalidated")
+
+    v2 = oracle.assess(_tc("T2", "4 5\n", "10\n"), spec, ctx)
+    assert v2.status == "inconclusive"  # cannot adjudicate vs unvalidated ref
+
+
+def test_reference_executor_crash_is_inconclusive():
+    from autograder.app.testing.oracle.strategies import ReferenceSolutionOracle
+
+    oracle = ReferenceSolutionOracle("src")
+    oracle.prepare(
+        lambda src: {"ok": True, "binary": "/tmp/ref"}, _spec(),
+        run_reference=lambda b, s: _sum_executor(s))
+    v = oracle.assess(
+        _tc("T1", "4 5\n", "9\n"), _spec(),
+        OracleContext(reference_executor=lambda s: None))
+    assert v.status == "inconclusive"
+
+
+# ---------------------------------------------------------------------------
+# Instructor provenance: rules identity (version + hash)
+# ---------------------------------------------------------------------------
+
+def test_instructor_provenance_records_rules_identity():
+    from autograder.app.testing.oracle.strategies import InstructorExpectedOracle
+
+    strat = InstructorExpectedOracle()
+    ctx = OracleContext(
+        instructor_expected={"7 8\n": "15\n"},
+        rules_version="2.3.0", rules_hash="sha256:deadbeef")
+    v = strat.assess(_tc("T7", "7 8\n", "15\n"), _spec(), ctx)
+    assert v.status == "trusted"
+    assert v.evidence["rules_version"] == "2.3.0"
+    assert v.evidence["rules_hash"] == "sha256:deadbeef"
+    assert "2.3.0" in v.provenance.detail
+    assert "sha256:deadbeef" in v.provenance.detail
+
+    # Through the service, the identity reaches the test case provenance.
+    svc = OracleService()
+    updated, _ = svc.assess(_tc("T7", "7 8\n", "15\n"), _spec(), _rules(), ctx)
+    assert updated.status == "trusted"
+    assert "2.3.0" in updated.expected.provenance.detail
+
+
+# ---------------------------------------------------------------------------
+# D10: budget enforcement
+# ---------------------------------------------------------------------------
+
+def test_token_budget_stops_refinement(mock_ollama):
+    """A 1-token budget is blown by the first generation round; the loop
+    must stop (no refinement round) and record the limitation."""
+    url, server = mock_ollama
+    server.script["generate"] = [
+        ("json", {"response": json.dumps(CANDIDATES)}),
+        ("json", {"response": json.dumps({"candidates": []})}),
+    ]
+    rules = _rules()
+    rules.test_generation.token_budget = 1
+    client = OllamaClient(url)
+    try:
+        summary = generate_test_suite(_spec(), rules, client)
+    finally:
+        client.close()
+    assert summary["rounds_used"] == 1
+    assert summary["tokens_used"] > 1
+    assert any("token budget exhausted" in lim
+               for lim in summary["limitations"])
+    # Round-1 candidates were still admitted (budget gates FUTURE rounds).
+    assert {tc.id for tc in summary["candidates"]} == {"T1", "T2"}
+
+
+def test_exec_budget_exhaustion_marks_inconclusive():
+    """The single execution slot is spent validating the reference
+    against the spec example; the candidate run then has no budget and
+    must be inconclusive — never executed anyway, never trusted."""
+    from autograder.app.testing.generation.budgets import BudgetTracker
+    from autograder.app.testing.oracle.strategies import ReferenceSolutionOracle
+
+    tracker = BudgetTracker(token_budget=100_000, exec_budget=1)
+    oracle = ReferenceSolutionOracle("src")
+    oracle.set_budget_tracker(tracker)
+    prep = oracle.prepare(
+        lambda src: {"ok": True, "binary": "/tmp/ref"}, _spec(),
+        run_reference=lambda b, s: _sum_executor(s))
+    assert prep["validated"] is True
+    assert tracker.execs_used == 1
+
+    v = oracle.assess(
+        _tc("T1", "4 5\n", "9\n"), _spec(),
+        OracleContext(reference_executor=_sum_executor))
+    assert v.status == "inconclusive"
+    assert "execution budget exhausted" in v.provenance.detail
+
+
+def test_exec_budget_zero_blocks_example_validation():
+    """With zero execution budget the reference cannot validate even one
+    example: it stays unvalidated (ready, but capped) — coverage 0."""
+    from autograder.app.testing.generation.budgets import BudgetTracker
+    from autograder.app.testing.oracle.strategies import ReferenceSolutionOracle
+
+    tracker = BudgetTracker(token_budget=100_000, exec_budget=0)
+    oracle = ReferenceSolutionOracle("src")
+    oracle.set_budget_tracker(tracker)
+    prep = oracle.prepare(
+        lambda src: {"ok": True, "binary": "/tmp/ref"}, _spec(),
+        run_reference=lambda b, s: _sum_executor(s))
+    assert prep["ready"] is True
+    assert prep["validated"] is False
+    assert prep["examples_run"] == 0

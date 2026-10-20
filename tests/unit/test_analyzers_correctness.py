@@ -103,3 +103,38 @@ def test_normalize_trailing_policy(sandbox_executor, tmp_path):
     result = correctness.analyze(ctx)
     assert result.status == "completed"
     assert result.score == 1.0
+
+
+# ---------------------------------------------------------------------------
+# D10: shared execution budget
+# ---------------------------------------------------------------------------
+
+def test_exec_budget_limits_trusted_runs(sandbox_executor, tmp_path):
+    """With an execution budget of 1, only the first trusted test runs;
+    the rest are disclosed as not-executed (never silently failed), and
+    the score covers only what actually ran."""
+    from autograder.app.testing.generation.budgets import BudgetTracker
+
+    ctx = _ctx(sandbox_executor, tmp_path, "correct_add.c", _cases())
+    ctx.budget_tracker = BudgetTracker(token_budget=10**9, exec_budget=1)
+    result = correctness.analyze(ctx)
+    assert result.status == "completed"
+    assert result.measurements["total_trusted"] == 1  # executed
+    assert result.measurements["trusted_total"] == 3
+    assert result.measurements["not_executed_trusted"] == 2
+    assert result.score == 1.0  # the one executed test passed
+    assert any("execution budget exhausted" in w for w in result.warnings)
+    assert any("not executed" in lim for lim in result.limitations)
+
+
+def test_exec_budget_zero_trusted_runs_is_inconclusive(sandbox_executor, tmp_path):
+    """Budget exhausted before ANY trusted test runs -> inconclusive,
+    not a manufactured zero."""
+    from autograder.app.testing.generation.budgets import BudgetTracker
+
+    ctx = _ctx(sandbox_executor, tmp_path, "correct_add.c", _cases())
+    ctx.budget_tracker = BudgetTracker(token_budget=10**9, exec_budget=0)
+    result = correctness.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+    assert any("execution budget exhausted" in w for w in result.warnings)

@@ -57,6 +57,60 @@ def test_generate_success_and_record(mock_ollama):
     client.close()
 
 
+def test_generate_sends_num_predict_and_records_tokens(mock_ollama):
+    """D27 + D10: the configured max_tokens reaches Ollama as
+    ``options.num_predict``, and the server's eval counts land on the
+    GenerationRecord as tokens_used."""
+    url, server = mock_ollama
+    server.script["generate"] = [
+        ("json", {"response": '{"name": "x", "score": 0.5}',
+                  "prompt_eval_count": 120, "eval_count": 30})
+    ]
+    client = OllamaClient(url)
+    item, record = client.generate_structured(
+        task="t", prompt="p", schema=_Item, model_cfg=_cfg(max_tokens=777),
+        prompt_name="specification")
+    client.close()
+    body = json.loads(server.last_request_body)
+    assert body["options"]["num_predict"] == 777
+    assert record.tokens_used == 150
+
+
+def test_generate_without_max_tokens_omits_num_predict_and_estimates(mock_ollama):
+    url, server = mock_ollama
+    response = '{"name": "x", "score": 0.5}'
+    server.script["generate"] = [("json", {"response": response})]
+    client = OllamaClient(url)
+    item, record = client.generate_structured(
+        task="t", prompt="p", schema=_Item, model_cfg=_cfg(),
+        prompt_name="specification")
+    client.close()
+    body = json.loads(server.last_request_body)
+    assert "num_predict" not in body["options"]
+    # No eval counts in the body -> documented len//4 estimate per side.
+    assert record.tokens_used == len("p") // 4 + len(response) // 4
+    assert record.tokens_used > 0
+
+
+def test_tokens_accumulate_across_validation_retries(mock_ollama):
+    """D10: usage from FAILED attempts counts too — the budget reflects
+    what was actually spent."""
+    url, server = mock_ollama
+    server.script["generate"] = [
+        ("json", {"response": "not json",
+                  "prompt_eval_count": 10, "eval_count": 5}),
+        ("json", {"response": '{"name": "x", "score": 0.5}',
+                  "prompt_eval_count": 20, "eval_count": 7}),
+    ]
+    client = OllamaClient(url)
+    item, record = client.generate_structured(
+        task="t", prompt="p", schema=_Item, model_cfg=_cfg(),
+        prompt_name="specification")
+    client.close()
+    assert item.name == "x"
+    assert record.tokens_used == 15 + 27
+
+
 def test_retry_on_500_then_success(mock_ollama):
     url, server = mock_ollama
     server.script["generate"] = [

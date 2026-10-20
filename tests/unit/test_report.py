@@ -31,6 +31,8 @@ def build_report_dict(grade_override=None, contrib_override=None):
             contrib = contrib_override
         metrics.append({
             "name": m.name, "analyzer": m.analyzer, "weight": float(m.weight),
+            "configured_weight": float(m.configured_weight),
+            "effective_weight": float(m.effective_weight),
             "score": float(m.score), "contribution": contrib, "status": m.status,
         })
     grade = float(out.grade) if out.grade is not None else None
@@ -104,3 +106,73 @@ def test_missing_required_section_rejected():
 def test_accepts_report_instance():
     r = validate_report(build_report_dict())
     assert validate_report(r).run_id == "r1"
+
+
+# ---------------------------------------------------------------------------
+# Policy 1.1: dual weights (D7)
+# ---------------------------------------------------------------------------
+
+def _rules_obj():
+    return make_rules([("correctness", "correctness", 0.6), ("compiler", "compiler", 0.4)])
+
+
+def test_validate_with_rules_accepts_matching_configured_weights():
+    r = validate_report(build_report_dict(), _rules_obj())
+    assert r.metrics[0].configured_weight == 0.6
+    assert r.metrics[0].effective_weight == 0.6
+
+
+def test_validate_rejects_configured_weight_mismatch_vs_rules():
+    d = build_report_dict()
+    d["metrics"][0]["configured_weight"] = 0.9  # rules say 0.6
+    with pytest.raises(ReportError, match="configured_weight"):
+        validate_report(d, _rules_obj())
+
+
+def test_validate_rules_check_requires_configured_weight():
+    d = build_report_dict()
+    d["metrics"][0]["configured_weight"] = None
+    with pytest.raises(ReportError, match="configured_weight missing"):
+        validate_report(d, _rules_obj())
+
+
+def test_validate_rules_check_rejects_unknown_metric():
+    d = build_report_dict()
+    d["metrics"][0]["name"] = "not_in_rules"
+    with pytest.raises(ReportError, match="not present in the rules"):
+        validate_report(d, _rules_obj())
+
+
+def test_validate_rejects_weight_effective_drift():
+    d = build_report_dict()
+    d["metrics"][0]["effective_weight"] = 0.25  # weight stays 0.6
+    with pytest.raises(ReportError, match="effective_weight"):
+        validate_report(d)
+
+
+def test_reconciliation_uses_effective_weight_under_renormalization():
+    # Optional metric missing under renormalize: contributions reconcile
+    # against EFFECTIVE weights (1.0), not configured ones (0.5).
+    rules = make_rules(
+        [("m0", "correctness", 0.5, True), ("m1", "compiler", 0.5, False)],
+        uncertainty_policy={"required_metric_missing": "incomplete",
+                            "optional_metric_missing": "renormalize"},
+    )
+    out = score([make_result("m0", "correctness", 0.8)], rules)
+    assert out.grade is not None and float(out.grade) == 80.0
+    metrics = []
+    for m in out.per_metric:
+        metrics.append({
+            "name": m.name, "analyzer": m.analyzer, "weight": float(m.weight),
+            "configured_weight": float(m.configured_weight),
+            "effective_weight": float(m.effective_weight),
+            "score": float(m.score) if m.score is not None else None,
+            "contribution": float(m.contribution), "status": m.status,
+        })
+    d = build_report_dict()
+    d["metrics"] = metrics
+    d["grade"] = 80.0
+    d["status"] = "completed_with_warnings"
+    r = validate_report(d, rules)
+    m0 = r.metrics[0]
+    assert m0.configured_weight == 0.5 and m0.effective_weight == 1.0
