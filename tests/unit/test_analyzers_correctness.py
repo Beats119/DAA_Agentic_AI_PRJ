@@ -1,6 +1,5 @@
 """Correctness analyzer: real compilation + sandboxed runs of fixtures."""
 
-import pytest
 
 from conftest import compile_fixture, make_analyzer_ctx, trusted_case
 
@@ -138,3 +137,124 @@ def test_exec_budget_zero_trusted_runs_is_inconclusive(sandbox_executor, tmp_pat
     assert result.status == "inconclusive"
     assert result.score is None
     assert any("execution budget exhausted" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# D15: sandbox infrastructure failures are NOT student test failures
+# ---------------------------------------------------------------------------
+
+class _RaisingExecutor:
+    """TEST-ONLY stub executor: every run refuses (sandbox down)."""
+
+    def run(self, argv, stdin_text, limits, **kw):
+        from autograder.app.sandbox.executor import SandboxError
+
+        raise SandboxError("sandbox unavailable: landlock not supported")
+
+
+class _FlakyExecutor:
+    """TEST-ONLY stub executor: delegates to the real executor except for
+    one input, where the launcher 'fails' (infrastructure, not student)."""
+
+    def __init__(self, real, bad_input):
+        self._real = real
+        self._bad = bad_input
+
+    def run(self, argv, stdin_text, limits, **kw):
+        if stdin_text == self._bad:
+            from autograder.app.sandbox.executor import SandboxError
+
+            raise SandboxError("sandbox launcher exited 125")
+        return self._real.run(argv, stdin_text, limits, **kw)
+
+
+class _UnenforcedExecutor:
+    """TEST-ONLY stub executor: returns a result whose enforcement report
+    shows a mandatory mechanism missing."""
+
+    def run(self, argv, stdin_text, limits, **kw):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            stdout="5\n", stderr="", exit_code=0, signal=None,
+            timed_out=False, wall_s=0.01,
+            enforcement=SimpleNamespace(
+                landlock_fs=False, seccomp_filter=True, network_isolated=True
+            ),
+        )
+
+
+def _ctx_with_executor(sandbox_executor, tmp_path, executor):
+    binary, _ = compile_fixture(sandbox_executor, tmp_path, "correct_add.c")
+    ctx = make_analyzer_ctx(
+        sandbox_executor, tmp_path, "correctness", "correct_add.c",
+        binary_path=binary, test_cases=_cases(),
+    )
+    ctx.executor = executor
+    return ctx
+
+
+def test_all_infra_errors_is_inconclusive_not_zero(sandbox_executor, tmp_path):
+    ctx = _ctx_with_executor(sandbox_executor, tmp_path, _RaisingExecutor())
+    result = correctness.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+    assert result.findings == []
+    assert "infrastructure failed for all" in result.diagnostics["reason"]
+    # Infra records are minted under their own evidence kind, never as
+    # test_result (feedback rebuilds trusted results from test_result).
+    kinds = [ev.kind for ev in ctx.evidence]
+    assert kinds and all(k == "test_infra_error" for k in kinds)
+
+
+def test_some_infra_errors_excluded_from_score(sandbox_executor, tmp_path):
+    ctx = _ctx_with_executor(
+        sandbox_executor, tmp_path, _FlakyExecutor(sandbox_executor, "0 0")
+    )
+    result = correctness.analyze(ctx)
+    assert result.status == "completed"
+    # Both tests that actually ran passed; the infra-failed one is
+    # excluded — not counted as a failure.
+    assert result.score == 1.0
+    assert result.measurements["passed_trusted"] == 2
+    assert result.measurements["total_trusted"] == 2
+    assert result.measurements["infra_errors"] == 1
+    assert result.findings == []
+    assert any("infrastructure failed" in w for w in result.warnings)
+    assert any("infrastructure failure" in lim for lim in result.limitations)
+
+
+def test_unenforced_run_is_infra_error(sandbox_executor, tmp_path):
+    ctx = _ctx_with_executor(sandbox_executor, tmp_path, _UnenforcedExecutor())
+    result = correctness.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+
+
+def test_feedback_trusted_results_skip_infra_records():
+    # D15 defense in depth: even a legacy test_result record carrying an
+    # infra_error outcome must not be rebuilt as a student failure.
+    from types import SimpleNamespace
+
+    from autograder.app.orchestration.feedback import build_trusted_results
+
+    class _Registry:
+        def all(self):
+            return [
+                SimpleNamespace(
+                    analyzer="correctness", kind="test_result", id="ev:x:1",
+                    data={"id": "t1", "passed": False, "outcome": "infra_error",
+                          "input": "1", "expected": "2", "actual": None,
+                          "oracle_provenance": {}},
+                ),
+                SimpleNamespace(
+                    analyzer="correctness", kind="test_result", id="ev:x:2",
+                    data={"id": "t2", "passed": True, "outcome": "run_ok",
+                          "input": "1", "expected": "2", "actual": "2",
+                          "oracle_provenance": {}},
+                ),
+            ]
+
+    trusted, failing = build_trusted_results(_Registry())
+    assert set(trusted) == {"t2"}
+    assert failing == []

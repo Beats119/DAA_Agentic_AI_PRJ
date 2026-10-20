@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from autograder.app.sandbox import SandboxExecutor, SandboxUnavailable
+from autograder.app.sandbox import SandboxUnavailable
 
 
 def _recording_binary(tmp_path: "object") -> str:

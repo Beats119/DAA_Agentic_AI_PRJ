@@ -62,7 +62,7 @@ def proc_cmdline_contains(marker: str) -> bool:
                 cmdline = fh.read().replace(b"\0", b" ").decode(errors="replace")
             if marker in cmdline:
                 with open(f"/proc/{pid}/status") as fh:
-                    state = [l for l in fh if l.startswith("State:")]
+                    state = [ln for ln in fh if ln.startswith("State:")]
                 if state and "Z (" not in state[0]:
                     return True
         except (OSError, FileNotFoundError):

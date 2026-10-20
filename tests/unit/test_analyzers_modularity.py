@@ -31,10 +31,11 @@ def _ctx(sandbox_executor, tmp_path, source_name="correct_add.c", **kw):
 
 def test_extract_functions_finds_both():
     src = open("/home/hatch/workspace/daa_prj/tests/fixtures/c/correct_add.c").read()
-    fns, conf = _extract_functions(src)
+    fns, conf, candidates = _extract_functions(src)
     names = {f["name"] for f in fns}
     assert names == {"add", "main"}
     assert conf == 1.0
+    assert candidates == 2
 
 
 def test_well_decomposed_scores_full(sandbox_executor, tmp_path):
@@ -70,3 +71,43 @@ def test_no_functions_is_inconclusive(sandbox_executor, tmp_path):
     result = modularity.analyze(ctx)
     assert result.status == "inconclusive"
     assert result.score is None
+    assert result.measurements["parse_candidates"] == 0
+    assert "no function definitions detected" in result.diagnostics["reason"]
+
+
+# A function whose braces are split by preprocessor conditionals defeats
+# the regex parser: the candidate is seen but its body never balances.
+_UNPARSEABLE_FN = """int weird(int x) {
+#if 0
+    if (x) {
+#endif
+    return x;
+}
+"""
+
+
+def test_unparseable_candidates_are_not_claimed_as_no_functions(
+    sandbox_executor, tmp_path
+):
+    # The parser SAW a definition but could not parse it — the result
+    # must report an unsupported-style limitation, not "no functions".
+    ctx = _ctx(sandbox_executor, tmp_path, source_text=_UNPARSEABLE_FN)
+    result = modularity.analyze(ctx)
+    assert result.status == "inconclusive"
+    assert result.score is None
+    assert result.measurements["parse_candidates"] == 1
+    assert result.measurements["parse_confidence"] == 0.0
+    assert "none could be parsed" in result.diagnostics["reason"]
+    assert any("none could be parsed" in w for w in result.warnings)
+
+
+def test_low_parse_confidence_is_surfaced_as_warning(sandbox_executor, tmp_path):
+    src = "int ok(int x) { return x; }\n" + _UNPARSEABLE_FN + _UNPARSEABLE_FN.replace(
+        "weird", "weird2"
+    )
+    ctx = _ctx(sandbox_executor, tmp_path, source_text=src)
+    result = modularity.analyze(ctx)
+    assert result.status == "completed"
+    assert result.measurements["parse_candidates"] == 3
+    assert result.measurements["parse_confidence"] < 0.5
+    assert any("parsing is uncertain" in w for w in result.warnings)

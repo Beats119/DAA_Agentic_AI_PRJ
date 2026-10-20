@@ -68,12 +68,22 @@ def test_requirement_mismatch_penalized(sandbox_executor, tmp_path):
     assert any("does not match" in f for f in result.findings)
 
 
-def test_no_requirement_is_informational(sandbox_executor, tmp_path):
+def test_no_requirement_is_inconclusive(sandbox_executor, tmp_path):
+    # D11 (Phase G): this test previously pinned `score_when_no_requirement
+    # = 1.0` — a manufactured full score when the rules set no required
+    # class. That behavior was wrong: with nothing to grade the inference
+    # against, the analyzer must be inconclusive (score None) and say why.
     ctx = _ctx(sandbox_executor, tmp_path, "correct_add.c")
     result = complexity.analyze(ctx)
-    assert result.status == "completed"
+    assert result.status == "inconclusive"
+    assert result.score is None
+    # The inferred class is still recorded as information.
     assert result.measurements["inferred_class"] == "O(1)"
-    assert result.score == 1.0
+    assert result.measurements["required_class"] is None
+    assert any(
+        "no required complexity class specified" in lim
+        for lim in result.limitations
+    )
 
 
 def test_recursion_is_inconclusive(sandbox_executor, tmp_path):
@@ -86,7 +96,12 @@ def test_recursion_is_inconclusive(sandbox_executor, tmp_path):
 
 def test_timing_leg_never_scores(sandbox_executor, tmp_path):
     cases = [trusted_case("t1", "30", "189225")]
-    ctx = _ctx(sandbox_executor, tmp_path, "loop_heavy.c", cases)
+    # A requirement is set so the run reaches `completed` (D11: without one
+    # the analyzer is inconclusive); timing must still not affect the score.
+    ctx = _ctx(
+        sandbox_executor, tmp_path, "loop_heavy.c", cases,
+        rules_overrides={"complexity": {"required": "O(n^2)"}},
+    )
     result = complexity.analyze(ctx)
     assert result.status == "completed"
     assert result.measurements["timing_samples"] == 1

@@ -1,6 +1,6 @@
 """Compiler analyzer: clean / warnings / errors via real gcc runs."""
 
-from conftest import compile_fixture, make_analyzer_ctx
+from conftest import make_analyzer_ctx
 
 from autograder.app.analyzers.compiler import analyzer as compiler
 

@@ -1,7 +1,6 @@
 """Infinite loop + forked sleeper: wall timeout must kill the whole tree."""
 
 import os
-import signal
 
 TIMEOUT_SRC = r"""
 #include <stdio.h>

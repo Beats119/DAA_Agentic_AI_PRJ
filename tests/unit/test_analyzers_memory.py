@@ -42,8 +42,30 @@ def test_clean_program_scores_full(sandbox_executor, tmp_path):
     if result.status == "completed":
         assert result.score == 1.0
         assert result.measurements["finding_count"] == 0
+        # D12: the result must disclose BOTH sanitizer trade-offs —
+        # unlimited address space and detect_leaks=0 (leaks unchecked).
+        lims = "\n".join(result.limitations)
+        assert "address-space" in lims and "RLIMIT_AS" in lims
+        assert "detect_leaks=0" in lims and "leaks are NOT checked" in lims
     else:
         pytest.skip(f"sanitizer unavailable: {result.diagnostics}")
+
+
+def test_student_build_failure_is_failed_not_unsupported(sandbox_executor, tmp_path):
+    # D12: a submission that does not compile under the sanitizer build is
+    # the student's failure — it must not be mislabeled `unsupported`
+    # (which claims a host/toolchain limitation).
+    from conftest import make_analyzer_ctx
+
+    ctx = make_analyzer_ctx(
+        sandbox_executor, tmp_path, "memory_safety", "broken.c",
+        source_text="int main(void) { this is not C at all; }\n",
+        test_cases=[trusted_case("t1", "1", "1")],
+    )
+    result = memsafe.analyze(ctx)
+    assert result.status == "failed"
+    assert result.score is None
+    assert "does not compile" in result.diagnostics["reason"]
 
 
 def test_overflow_detected(sandbox_executor, tmp_path):

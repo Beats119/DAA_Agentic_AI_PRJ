@@ -128,7 +128,6 @@ def make_analyzer_ctx(
     inline C to tmp_path (production code never sees these paths).
     """
     from autograder.app.analyzers.base import AnalyzerContext
-    from autograder.app.core.schemas import MetricConfig
     from autograder.app.sandbox import compile_c
 
     if source_text is not None:
