@@ -19,9 +19,24 @@ from typing import Any
 
 from ...sandbox.executor import ExecLimits
 from ..base import AnalyzerContext, build_result
-from .checks import SEVERITY_PENALTY, StaticFinding, run_builtin_checks
+from .checks import (
+    BUILTIN_CHECK_IDS,
+    SEVERITY_PENALTY,
+    StaticFinding,
+    run_builtin_checks,
+)
 
 ANALYZER_ID = "static_analysis"
+
+# Human-readable label for each cppcheck outcome, used in `checks_run`.
+_CPPCHECK_STATE_LABEL = {
+    "ran": "ran in sandbox",
+    "not_installed": "not installed",
+    "no_executor": "unavailable (no sandbox executor)",
+    "timed_out": "timed out in sandbox",
+    "failed": "failed in sandbox",
+    "not_attempted": "not attempted (disabled)",
+}
 
 DEFAULTS = {
     "score_floor": 0.0,
@@ -31,16 +46,28 @@ DEFAULTS = {
 }
 
 
-def _run_cppcheck(source_path: str, timeout_s: float, executor: Any) -> list[StaticFinding] | None:
+def _run_cppcheck(
+    source_path: str, timeout_s: float, executor: Any
+) -> tuple[list[StaticFinding] | None, str, str]:
     """Run cppcheck if installed, inside the sandbox.
 
-    Returns None when cppcheck is unavailable, no executor was provided
-    (cppcheck is never run unsandboxed), or the sandboxed run fails /
-    times out (not an analyzer error — the built-in checks still ran).
+    Returns ``(findings, status, detail)``. ``findings`` is None unless
+    the run actually happened; ``status`` is one of ``ran``,
+    ``not_installed``, ``no_executor``, ``timed_out``, ``failed`` and
+    ``detail`` says exactly what happened, so the analyzer can report it
+    instead of collapsing every failure into a vague "unavailable"
+    (cppcheck is never run unsandboxed; a failed/timed-out run is not an
+    analyzer error — the built-in checks still ran).
     """
     exe = shutil.which("cppcheck")
-    if exe is None or executor is None:
-        return None
+    if exe is None:
+        return None, "not_installed", "cppcheck is not installed on this host"
+    if executor is None:
+        return (
+            None,
+            "no_executor",
+            "no sandbox executor available — cppcheck is never run unsandboxed",
+        )
     read_paths = [str(Path(source_path).parent)]
     # cppcheck loads its cfg files relative to the install prefix.
     for cfg_dir in (str(Path(exe).resolve().parent.parent / "share" / "cppcheck"), "/usr/share/cppcheck"):
@@ -54,10 +81,20 @@ def _run_cppcheck(source_path: str, timeout_s: float, executor: Any) -> list[Sta
             read_paths=read_paths,
             seccomp_profile="compiler",
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        return (
+            None,
+            "failed",
+            f"cppcheck run failed in the sandbox ({type(exc).__name__}: {exc})",
+        )
     if result.timed_out:
-        return None
+        return None, "timed_out", f"cppcheck timed out after {timeout_s:g}s in the sandbox"
+    if result.exit_code not in (0, None):
+        return (
+            None,
+            "failed",
+            f"cppcheck exited with code {result.exit_code} in the sandbox",
+        )
     findings: list[StaticFinding] = []
     for line in (result.stderr or "").splitlines():
         parts = line.split(":", 3)
@@ -78,7 +115,7 @@ def _run_cppcheck(source_path: str, timeout_s: float, executor: Any) -> list[Sta
                 tool="cppcheck",
             )
         )
-    return findings
+    return findings, "ran", "cppcheck ran inside the sandbox (compiler profile)"
 
 
 def analyze(ctx: AnalyzerContext) -> Any:
@@ -95,21 +132,44 @@ def analyze(ctx: AnalyzerContext) -> Any:
 
     builtin = run_builtin_checks(source)
     cppcheck_findings: list[StaticFinding] = []
-    cppcheck_status = "not_attempted"
+    cppcheck_status = "not_attempted"  # coarse status (ran|unavailable|not_attempted)
+    cppcheck_state = "not_attempted"  # exact outcome of the cppcheck step
+    cppcheck_detail = "cppcheck disabled by metric params (use_cppcheck=false)"
     if params["use_cppcheck"]:
-        result = _run_cppcheck(ctx.source_path, float(params["cppcheck_timeout_s"]), ctx.executor)
-        if result is None:
+        found, cppcheck_state, cppcheck_detail = _run_cppcheck(
+            ctx.source_path, float(params["cppcheck_timeout_s"]), ctx.executor
+        )
+        if found is None:
             cppcheck_status = "unavailable"
         else:
             cppcheck_status = "ran"
-            cppcheck_findings = result
+            cppcheck_findings = found
+
+    # Exactly which checks were performed — a result must never imply
+    # cppcheck ran when it did not.
+    checks_run = list(BUILTIN_CHECK_IDS) + [
+        "cppcheck: " + _CPPCHECK_STATE_LABEL[cppcheck_state]
+    ]
 
     all_findings = builtin + cppcheck_findings
     limitations: list[str] = []
-    if cppcheck_status == "unavailable":
+    if cppcheck_state == "not_installed":
         limitations.append(
             "cppcheck is not installed on this host — only built-in checks ran "
             "(install cppcheck for deeper analysis)"
+        )
+    elif cppcheck_state == "no_executor":
+        limitations.append(
+            "cppcheck was not run: no sandbox executor available and "
+            "cppcheck is never run unsandboxed — only built-in checks ran"
+        )
+    elif cppcheck_state == "timed_out":
+        limitations.append(
+            "cppcheck timed out inside the sandbox — only built-in checks ran"
+        )
+    elif cppcheck_state == "failed":
+        limitations.append(
+            "cppcheck failed inside the sandbox — only built-in checks ran"
         )
 
     penalties = params["severity_penalty"]
@@ -125,7 +185,10 @@ def analyze(ctx: AnalyzerContext) -> Any:
                     "builtin": len(builtin),
                     "cppcheck": len(cppcheck_findings),
                     "cppcheck_status": cppcheck_status,
+                    "cppcheck_state": cppcheck_state,
+                    "cppcheck_detail": cppcheck_detail,
                 },
+                "checks_run": checks_run,
                 "findings": [
                     {
                         "check_id": f.check_id,
@@ -155,6 +218,9 @@ def analyze(ctx: AnalyzerContext) -> Any:
             "builtin_count": len(builtin),
             "cppcheck_count": len(cppcheck_findings),
             "cppcheck_status": cppcheck_status,
+            "cppcheck_state": cppcheck_state,
+            "cppcheck_detail": cppcheck_detail,
+            "checks_run": checks_run,
             "total_penalty": round(total_penalty, 4),
         },
         evidence_refs=evidence_refs,

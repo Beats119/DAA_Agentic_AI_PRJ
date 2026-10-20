@@ -81,21 +81,61 @@ class EvidenceRegistry:
         meta: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> str:
-        """Store a large blob by content hash; the record references the hash."""
+        """Store a large blob by content hash; the record references the hash.
+
+        The blob is persisted BEFORE the record is minted, and the record's
+        hash is the hash of the bytes read back from the store — a record
+        can never cite bytes that were not actually persisted (D28). If
+        persistence fails, :class:`EvidenceError` is raised and no record
+        is created.
+        """
         digest = hashlib.sha256(blob).hexdigest()
         if self._store is not None:
-            # Append-only artifact store; same content -> same name -> the
-            # store refuses overwrites, which is fine (identical bytes).
+            name = f"blobs/{digest}.bin"
             try:
-                self._store.write_artifact(
-                    self.run_id, f"blobs/{digest}.bin", blob
-                )
+                self._store.write_artifact(self.run_id, name, blob)
             except Exception:
-                # Best effort: the registry record still carries the hash.
+                # The append-only store refuses overwrites; identical
+                # content under the same name is fine (content-addressed
+                # dedupe) — anything else falls through to the read-back
+                # check below, which adjudicates.
                 pass
+            try:
+                persisted = self._store.read_artifact(self.run_id, name)
+            except Exception as exc:
+                raise EvidenceError(
+                    f"blob {digest} could not be persisted: {exc}"
+                ) from exc
+            persisted_digest = hashlib.sha256(persisted).hexdigest()
+            if persisted_digest != digest:
+                raise EvidenceError(
+                    f"persisted blob hash mismatch: record would cite "
+                    f"{digest}, store holds {persisted_digest}"
+                )
+            digest = persisted_digest
         data = dict(meta or {})
         data.update({"blob_sha256": digest, "blob_bytes": len(blob)})
         return self.append(kind, analyzer, data, **kwargs)
+
+    def verify_blob(self, evidence_id: str) -> bool:
+        """True iff the blob cited by a record is intact in the store.
+
+        Recomputes the hash of the persisted bytes and compares it with
+        the hash recorded at append time. Missing records without blob
+        data, a missing store, a missing blob, and corrupted bytes all
+        verify as False.
+        """
+        ev = self.get(evidence_id)
+        digest = ev.data.get("blob_sha256")
+        if not digest or self._store is None:
+            return False
+        try:
+            persisted = self._store.read_artifact(
+                self.run_id, f"blobs/{digest}.bin"
+            )
+        except Exception:
+            return False
+        return hashlib.sha256(persisted).hexdigest() == digest
 
     # ------------------------------------------------------------------ #
     def get(self, evidence_id: str) -> Evidence:

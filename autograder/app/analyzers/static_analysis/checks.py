@@ -116,3 +116,12 @@ def run_builtin_checks(source: str) -> list[StaticFinding]:
 
 
 SEVERITY_PENALTY = {"high": 0.3, "medium": 0.15, "low": 0.05}
+
+# Ids of every built-in check `run_builtin_checks` executes (all of them
+# run on every source; findings are only produced on a match). The
+# analyzer reports these in `checks_run` so a result states exactly
+# which checks were performed.
+BUILTIN_CHECK_IDS: list[str] = [cid for _, cid, _, _ in _FUNC_CHECKS] + [
+    "builtin.scanf-no-width",
+    "builtin.main-no-return",
+]
