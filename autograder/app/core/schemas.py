@@ -235,7 +235,12 @@ class AssignmentDoc(StrictModel):
 
 
 class ExpectedProvenance(StrictModel):
-    tier: Literal["tier1_reference", "tier2_independent", "tier3_llm", "instructor"]
+    # "unknown" is the honest fallback when provenance is genuinely
+    # unavailable (see workflow report building): it must never be
+    # silently relabeled as a real tier — assumptions never become
+    # grading rules.
+    tier: Literal["tier1_reference", "tier2_independent", "tier3_llm",
+                  "instructor", "unknown"]
     method: str = Field(min_length=1)  # how the expected output was established
     detail: str = ""
 
@@ -496,6 +501,11 @@ class Report(StrictModel):
 class RunManifest(StrictModel):
     run_id: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=_utcnow)
+    # Set when the manifest is written at finalize time (D20): the run's
+    # terminal state and the moment it finished. Manifests are (re)written
+    # only at finalize, so a persisted manifest never claims a mid-pipeline
+    # state for a finished run.
+    finished_at: datetime | None = None
     state: RunStatus
     submission_hash: str
     assignment_hash: str
