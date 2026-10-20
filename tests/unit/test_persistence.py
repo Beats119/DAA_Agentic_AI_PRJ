@@ -41,7 +41,7 @@ def test_unknown_run_raises(store):
 def test_full_state_walk(store):
     rec = make_run(store)
     for state in ["validating", "planning", "generating_tests", "executing",
-                  "analyzing", "scoring", "reporting", "completed"]:
+                  "analyzing", "scoring", "feedback", "reporting", "completed"]:
         rec = store.transition_run(rec.id, state)
     assert rec.state == "completed"
 

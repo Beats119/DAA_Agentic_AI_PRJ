@@ -47,7 +47,7 @@ def client(tmp_path):
 
 def _walk_to_reporting(store: RunStore, rid: str) -> None:
     for state in ("validating", "planning", "generating_tests",
-                  "executing", "analyzing", "scoring", "reporting"):
+                  "executing", "analyzing", "scoring", "feedback", "reporting"):
         store.transition_run(rid, state)
 
 
