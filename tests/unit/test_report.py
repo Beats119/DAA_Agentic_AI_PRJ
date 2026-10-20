@@ -4,16 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from autograder.app.core.schemas import (
-    AssignmentRef,
-    ExpectedProvenance,
-    FailingTest,
-    ReproductionInfo,
-    RulesRef,
-    SubmissionRef,
-)
 from autograder.app.reporting import ReportError, validate_report
-from autograder.app.reporting.schemas import Report
 from autograder.app.scoring import POLICY_VERSION, score
 
 from .conftest import make_result, make_rules

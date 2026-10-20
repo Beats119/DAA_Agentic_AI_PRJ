@@ -120,3 +120,115 @@ def test_list_runs(store):
     make_run(store)
     assert len(store.list_runs()) == 2
     assert store.list_runs(state="completed") == []
+
+
+# ---------------- D26: WAL, cross-instance use, recovery ----------------
+
+def test_wal_mode_and_busy_timeout(tmp_path):
+    import sqlite3
+
+    s = RunStore(tmp_path)
+    try:
+        mode = s._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+        busy = s._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert busy >= 1000
+    finally:
+        s.close()
+    # WAL persists in the DB file for other connections too.
+    conn = sqlite3.connect(str(tmp_path / "autograder.db"))
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        conn.close()
+
+
+def test_two_stores_share_one_db(tmp_path):
+    """D26: two RunStore instances on one DB (API + workflow) must not
+    die with 'database is locked' under concurrent writes."""
+    import threading
+
+    a = RunStore(tmp_path)
+    b = RunStore(tmp_path)
+    errors: list[Exception] = []
+
+    def work(store, tag):
+        try:
+            for i in range(15):
+                rec = store.create_run(
+                    submission_hash=f"sha256:s{tag}{i}",
+                    assignment_hash="sha256:a", rules_hash="sha256:r",
+                    rules_version="1.0.0")
+                store.transition_run(rec.id, "validating")
+                store.write_artifact(rec.id, "r.json", b"{}")
+        except Exception as exc:  # noqa: BLE001 - collected for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(a, "a")),
+               threading.Thread(target=work, args=(b, "b"))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    try:
+        assert errors == []
+        assert len(a.list_runs(limit=100)) == 30
+        assert len(b.list_runs(limit=100)) == 30
+    finally:
+        a.close()
+        b.close()
+
+
+def test_verify_artifact_detects_tampering(store, tmp_path):
+    rec = make_run(store)
+    store.write_artifact(rec.id, "report.json", b'{"a":1}')
+    assert store.verify_artifact(rec.id, "report.json") is True
+    path = tmp_path / "runs" / rec.id / "report.json"
+    path.write_bytes(b'{"a":2}')  # tampered bytes, same name
+    assert store.verify_artifact(rec.id, "report.json") is False
+    path.unlink()  # deleted blob
+    assert store.verify_artifact(rec.id, "report.json") is False
+    assert store.verify_artifact(rec.id, "never-written.json") is False
+    assert store.verify_run_artifacts(rec.id) == {"report.json": False}
+
+
+def test_recover_interrupted_runs(store):
+    stuck = make_run(store)
+    store.transition_run(stuck.id, "validating")
+    store.transition_run(stuck.id, "planning")
+    done = make_run(store)
+    store.transition_run(done.id, "failed")  # terminal: untouched
+
+    # A cutoff at the stuck run's creation time must NOT recover it
+    # (it was still being updated then).
+    assert store.recover_interrupted_runs(before=stuck.created_at) == []
+
+    recovered = store.recover_interrupted_runs()
+    assert recovered == [stuck.id]
+    assert store.get_run(stuck.id).state == "failed"
+    names = [a.name for a in store.list_artifacts(stuck.id)]
+    assert "interrupted.txt" in names
+    assert b"interrupted by restart" in store.read_artifact(
+        stuck.id, "interrupted.txt")
+    # Idempotent: nothing left to recover.
+    assert store.recover_interrupted_runs() == []
+
+
+def test_reconcile_orphan_files(store, tmp_path):
+    rec = make_run(store)
+    store.write_artifact(rec.id, "kept.json", b"1")
+    run_dir = tmp_path / "runs" / rec.id
+    (run_dir / "orphan.bin").write_bytes(b"unreferenced")
+    (run_dir / "blobs").mkdir()
+    (run_dir / "blobs" / "deadbeef.bin").write_bytes(b"unreferenced")
+    # A directory for an unknown run is left untouched.
+    stranger = tmp_path / "runs" / ("f" * 32)
+    stranger.mkdir()
+    (stranger / "x.bin").write_bytes(b"not ours")
+
+    assert store.reconcile_orphan_files() == 2
+    assert (run_dir / "kept.json").exists()
+    assert not (run_dir / "orphan.bin").exists()
+    assert not (run_dir / "blobs" / "deadbeef.bin").exists()
+    assert (stranger / "x.bin").exists()
+    assert store.reconcile_orphan_files() == 0

@@ -99,3 +99,14 @@ def test_analyzer_statuses(status):
 def test_extra_fields_forbidden():
     with pytest.raises(ValidationError):
         TestCaseModel(**dict(case().model_dump(), bogus=1))
+
+
+def test_provenance_unknown_tier_is_valid_fallback():
+    # The workflow's failing-test report builder falls back to tier="unknown"
+    # when oracle provenance is missing (D: provenance fallback literal).
+    # It must construct cleanly instead of raising inside the except handler.
+    p = ExpectedProvenance(tier="unknown", method="unknown",
+                           detail="provenance unavailable")
+    assert p.tier == "unknown"
+    assert "unknown" not in ("tier1_reference", "tier2_independent",
+                             "tier3_llm", "instructor")
