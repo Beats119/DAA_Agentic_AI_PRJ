@@ -20,7 +20,7 @@ assignment spec and the tiered oracle at evaluation time.
 | `compile` | object | `compiler` (`gcc`/`clang`), `flags` (list), `std` (e.g. `c11`). |
 | `metrics` | list | One entry per metric: `name`, `analyzer` (must be a known analyzer id), `weight` (≥ 0), `required` (bool), `params` (analyzer-specific, see [docs/ANALYZERS.md](docs/ANALYZERS.md)), `thresholds`. |
 | `comparison_policy` | object | `whitespace`: `exact` \| `normalize_trailing`; `case_sensitive`: bool. |
-| `test_generation` | object | `max_rounds` (≤ 3), `max_candidates`, `token_budget`, `exec_budget`. |
+| `test_generation` | object | `max_rounds` (≤ 3), `max_candidates`, `token_budget`, `exec_budget`. Budgets are **enforced**, not advisory: token usage accumulates from gateway responses and is checked before each generation round; every oracle/correctness sandbox execution is charged to the shared per-run execution budget before it happens. Exhaustion stops further generation/execution and is recorded as a limitation — it never silently overspends or scores unexecuted tests. |
 | `oracle` | object | `tier_preference` (ordered list, default `["tier1_reference", "tier2_independent", "tier3_llm"]`), `reference_solution_path` (optional), `expected_outputs_path` (optional JSON `{input: output}`), `quarantine_after_rounds`. |
 | `complexity` | object | `required`: e.g. `"O(1)"` — compared against static inference. |
 | `similarity` | object | `corpus_paths` (list of dirs), `threshold` (flag for human review above this). |

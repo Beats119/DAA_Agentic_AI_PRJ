@@ -32,8 +32,9 @@ tasks:
 ```
 
 Temperature 0 + fixed seed keep repeated runs as stable as the model
-allows. To try a different local model, change the `model` value — model
-names are never hardcoded in code. Budgets (timeouts, token caps) live here
+allows. To try a different local model, change the `model` value — the
+loader rejects any task entry that does not name its model, so the model
+for every task comes from this file. Budgets (timeouts, token caps) live here
 and in the rules file's `test_generation` section.
 
 ## What happens when Ollama is unreachable
@@ -48,6 +49,53 @@ on failure it proceeds with `gateway=None` and records the limitation:
 
 This is the honest degraded path — demonstrated in [docs/DEMO.md](docs/DEMO.md).
 Nothing is fabricated to fill the gap.
+
+## Real-model verification (acceptance gate)
+
+**Status: NOT YET RUN.** Every LLM-driven behavior in this project has
+been proven only against labeled test doubles on the development VM
+(which has no Ollama). The procedure below is the acceptance gate for
+the BLOCKED–ENVIRONMENT criteria in `docs/ACCEPTANCE.md` (#5 fresh
+real-LLM generation, #17 real-model variance; it also closes the
+reachable-path gap in #3 and lets #22 be re-walked). Run it on the
+target machine (WSL, Ollama installed, `llama3.1:latest` pulled):
+
+```bash
+# 1. Start the server and confirm the model is present
+ollama serve
+ollama list                      # must show llama3.1
+
+# 2. Run the real-model test gate (4 tests: reachability, tags
+#    roundtrip, model usable for test generation, structured
+#    generation against the live model). On a machine without Ollama
+#    these skip with explicit reasons — a skip there is NOT a pass.
+.venv/bin/python -m pytest tests/integration/test_ollama_real.py -v
+
+# 3. Measure REAL repeated-run variance: evaluate the same submission
+#    5 times WITHOUT --no-llm (real gateway), distinct run ids
+for i in 0 1 2 3 4; do
+  .venv/bin/python -m autograder.app.orchestration.run \
+    --assignment docs/demo/assignment_add.txt \
+    --source tests/fixtures/c/correct_add.c \
+    --rules examples/rules/add.json \
+    --run-id realvar_$i --base-dir /tmp/realvar
+done
+
+# 4. Compare the 5 grades: max deviation must be ≤ 7.0
+python3 -c "
+import json, glob
+grades = [json.load(open(p))['grade']
+          for p in sorted(glob.glob('/tmp/realvar/runs/*/report.json'))]
+print('grades:', grades)
+print('max deviation:', max(grades) - min(grades) if grades and None not in grades else 'n/a — a run produced no grade; read its report limitations first')
+"
+```
+
+Record the outcome — the 4 test results, the 5 grades, and the max
+deviation — in `docs/VARIANCE.md`, and update the affected rows in
+`docs/ACCEPTANCE.md`. Until this has been done, real-model generation
+quality and variance remain **UNVERIFIED**, regardless of mock-path
+results.
 
 ## GPU notes
 

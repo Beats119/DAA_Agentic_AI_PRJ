@@ -3,9 +3,21 @@
 **Acceptance bar (docs/PLAN.md §6, item 17): max grade deviation ≤ 7.0 across
 repeated runs of the same submission + assignment + rules.**
 
+> **Status (2026-10-20):**
+> - **Deterministic-path variance: VERIFIED — 0.00.** The figure below
+>   was measured with the **deterministic FakeGateway** (a test double),
+>   so it proves the scoring layer's determinism end-to-end, *not* the
+>   real model's stability.
+> - **Real-model variance: UNVERIFIED — BLOCKED–ENVIRONMENT.** No
+>   Ollama is installed on this VM, so no run against a real LLM has
+>   ever been measured against the ≤ 7.0 bar. Do not cite 0.00 as a
+>   real-model result. Unblock: run the 5-run real-gateway procedure
+>   in [docs/OLLAMA.md](docs/OLLAMA.md) on the target machine and
+>   record the outcome here.
+
 ## Measurement (2026-10-20, this VM)
 
-Harness: `/tmp/variance_run.py` (test-only, not shipped) — runs the real
+Harness: a throwaway script (test-only, not shipped) ran the real
 `autograder.app.orchestration.workflow.evaluate()` 5 times on
 `tests/fixtures/c/correct_add.c` with a synthetic assignment PDF and
 `examples/rules/add.json`, using the **TEST-ONLY FakeGateway** from
@@ -61,6 +73,8 @@ Two layers, kept strictly separate:
 ## Not measured here
 
 True LLM-driven variance (5 runs against real Ollama + llama3.1) cannot be
-measured on this VM — no Ollama is installed here. Run
-`/tmp/variance_run.py`'s real equivalent on the target machine (Ollama
-reachable) and compare against the 7.0 bar before claiming it.
+measured on this VM — no Ollama is installed here. Run the equivalent
+procedure against the real gateway on the target machine (exact steps:
+[docs/OLLAMA.md](docs/OLLAMA.md), "Real-model verification") and compare
+against the 7.0 bar before claiming it. Until that run is recorded here,
+the real-model status stays **UNVERIFIED**.

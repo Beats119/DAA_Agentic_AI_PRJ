@@ -54,3 +54,115 @@ report language, and docs never claim authorship or LLM-authorship
 detection (asserted by a unit test). Instructors should use flags as triage,
 compare flagged pairs by hand, and set the corpus/threshold per assignment
 (`rules.similarity`).
+
+## 5. Memory-safety runs do not check leaks, and ASan runs lift the address-space limit
+
+**Unreliable-verdict scenario:** a submission leaks 50 MB per test input
+but never touches freed or out-of-bounds memory. The memory-safety
+analyzer reports it clean — a reader who assumes "memory safety" includes
+leak checking is misled.
+**Why:** ASan runs with `detect_leaks=0` (leak reports made the
+instrumented runs unreliable in this sandbox), and ASan requires a huge
+virtual address space, so `RLIMIT_AS` is disabled for sanitizer runs;
+physical memory is still bounded by ASan's `hard_rss_limit_mb` cap plus
+the wall/CPU/output limits. Both facts are disclosed in every completed
+memory-safety result's `limitations`.
+**Mitigation:** treat the metric as "memory *errors* + undefined
+behavior", not leak detection. If leak verdicts matter, run valgrind
+memcheck separately — it is not integrated.
+
+## 6. Resource accounting is rlimit-based — no cgroup v2
+
+**Unreliable-verdict scenario:** on a shared host, an instructor wants a
+hard per-run CPU-seconds budget across *all* of a run's processes,
+including short-lived grandchildren that each stay under their own
+per-process rlimits. The aggregate can exceed what a single rlimit
+reading suggests.
+**Why:** cgroup v2 is not delegated on the development VM (and may not
+be on the target either), so the sandbox enforces per-process rlimits
+(CPU, address space, file size, process count), a wall-clock timeout,
+output caps, and process-group kills — containment is enforced and
+tested, but there is no cgroup-level aggregate accounting.
+**Mitigation:** the configured concurrency bounds (≤2 API evaluation
+workers, ≤4 analyzer processes per evaluation, per-test limits from the
+rules file) bound the aggregate in practice. On a host with delegated
+cgroup v2, per-run accounting would still need to be wired — it does
+not happen automatically.
+
+## 7. The execution budget is reconciled across analyzer workers, not globally atomic
+
+**Unreliable-verdict scenario:** the rules set a tight `exec_budget`
+and, in a future configuration where more than one analyzer charges
+sandbox executions concurrently, the run executes a few more tests than
+the budget before the coordinator reconciles the workers' counters.
+**Why:** each analyzer worker enforces the budget strictly against its
+seeded snapshot; the parent sums the deltas afterwards. Today only the
+correctness analyzer charges executions, so the analyzer phase has a
+single consumer and the budget is exact in practice.
+**Mitigation:** keep execution-charging analyzers singular per phase, or
+treat the budget as a bound with small concurrent slack. The budget
+*does* hard-stop generation rounds and oracle/correctness execution
+within each consumer (checked before every operation).
+
+## 8. Seccomp policy is x86_64-only; other architectures refuse to run
+
+**Unreliable-verdict scenario:** the app is deployed on an ARM64 Linux
+host (e.g. an ARM cloud VM or Apple-silicon WSL). The syscall allowlist
+is an x86_64 table; rather than install a wrong filter, the launcher
+refuses and evaluations fail closed with `SandboxUnavailable`.
+**Mitigation:** deploy on x86_64 Linux (the documented target), or add a
+reviewed aarch64 syscall table — do not loosen the filter to "make it
+run".
+
+## 9. Privilege drop exists only when the app itself runs as root
+
+**Unreliable-verdict scenario:** on a normal (non-root) deployment,
+sandboxed student code runs as the same uid as the app — Landlock,
+seccomp, and the network namespace still contain it (and are tested in
+that configuration), but there is no second uid boundary, so anything
+the app user can read *through a sandbox escape* is exposed.
+**Why:** an unprivileged process cannot setuid to another user. The
+dedicated-identity drop (uid/gid 65534 by default, configurable via
+`AUTOGRADER_SANDBOX_POLICY`) applies when the app runs as root, which
+is the configuration the identity tests exercise.
+**Mitigation:** run the app as root in a dedicated VM/container if the
+two-uid boundary matters, or accept the single-uid model with the
+Landlock allowlist as the read barrier. The enforcement report always
+states the actual child uid and whether a drop happened — it never
+claims a drop that didn't occur.
+
+## 10. Real-model behavior is unverified (generation quality, variance, reviews)
+
+**Unreliable-verdict scenario:** an instructor reads the 0.00 variance
+figure or the mock-proven pipeline and assumes a real llama3.1 will
+generate equally stable, high-quality tests on their machine. The real
+model may produce weaker candidates, more `provisional` verdicts, and
+grade movement approaching the ≤ 7.0 bar — none of it measured yet.
+**Why:** this development VM has no Ollama; every LLM path is proven
+only against labeled test doubles, and the 4 real tests in
+`tests/integration/test_ollama_real.py` skip explicitly here.
+**Mitigation:** before relying on LLM-driven grades, run the gate
+procedure in [docs/OLLAMA.md](docs/OLLAMA.md) on the target machine and
+record real variance in [docs/VARIANCE.md](docs/VARIANCE.md). Until
+then, treat LLM-dependent acceptance items as BLOCKED–ENVIRONMENT
+(`docs/ACCEPTANCE.md` #5, #17, #22).
+
+## Platform & process caveats
+
+- **16 GB target is arithmetic, not a load test.** Measured on this VM:
+  API server idle ≈ 61 MB RSS; one full (degraded) evaluation ≈ 178 MB
+  peak process-tree RSS. Configured bounds (2 evaluation workers, ≤4
+  analyzer processes each, per-test memory limits from rules) keep the
+  app-side total far under 16 GB on paper, and Ollama's model memory
+  (~4.9 GB for llama3.1) is separate — but no full 16 GB-machine load
+  test has been performed.
+- **CI is written, not yet observed.** `.github/workflows/ci.yml`
+  (deterministic suite, security suite as its own job, lint) is
+  YAML-validated but has never run on GitHub Actions from this
+  environment; runner-specific capability differences may surface in
+  the security job on its first run.
+- **WSL2 target behavior is unmeasured.** The sandbox's mandatory
+  mechanisms (Landlock, netns, seccomp) are verified on this VM's
+  kernel 7.0; the WSL2 kernel on the target machine may report
+  different capabilities, in which case the app fails closed rather
+  than degrading silently.
