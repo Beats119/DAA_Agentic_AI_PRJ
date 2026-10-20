@@ -7,7 +7,7 @@
 {% endif %}
 <form id="eval-form" method="post" action="/api/evaluations" enctype="application/x-www-form-urlencoded">
   <label for="assignment_id">Assignment</label>
-  <select id="assignment_id" name="assignment_id" required>
+  <select id="assignment_id" name="assignment_id">
     <option value="">— upload below or pick an existing one —</option>
     {% for a in assignments %}<option value="{{ a.id }}">{{ a.filename }} ({{ a.id[:8] }})</option>{% endfor %}
   </select>
@@ -15,7 +15,7 @@
   <input type="file" id="assignment_file" name="assignment_file" accept=".pdf,.txt,.md">
 
   <label for="submission_id">Student C submission</label>
-  <select id="submission_id" name="submission_id" required>
+  <select id="submission_id" name="submission_id">
     <option value="">— upload below or pick an existing one —</option>
     {% for s in submissions %}<option value="{{ s.id }}">{{ s.filename }} ({{ s.id[:8] }})</option>{% endfor %}
   </select>
@@ -23,7 +23,7 @@
   <input type="file" id="submission_file" name="submission_file" accept=".c">
 
   <label for="rules_id">Grading rules</label>
-  <select id="rules_id" name="rules_id" required>
+  <select id="rules_id" name="rules_id">
     {% for r in rules %}<option value="{{ r.id }}" {% if loop.first %}selected{% endif %}>{{ r.name }} — v{{ r.version }}</option>{% endfor %}
   </select>
   <p class="muted small">Rules are versioned and hashed; the exact config used is recorded in the run manifest. <a href="/rules">Manage rules</a>.</p>

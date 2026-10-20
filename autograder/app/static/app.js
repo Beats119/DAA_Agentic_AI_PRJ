@@ -45,8 +45,12 @@
       var submissionId = formData.get("submission_id") ||
         await upload("/api/submissions", formData.get("submission_file"));
       var rulesId = formData.get("rules_id");
-      if (!assignmentId || !submissionId || !rulesId)
-        throw new Error("assignment, submission and rules are all required");
+      if (!assignmentId)
+        throw new Error("Pick an existing assignment or upload an assignment file.");
+      if (!submissionId)
+        throw new Error("Pick an existing submission or upload a C file.");
+      if (!rulesId)
+        throw new Error("Pick grading rules (add them on the Rules page first).");
 
       out.innerHTML = "<p><span class=\"spin\"></span> Starting evaluation…</p>";
       var resp = await fetch("/api/evaluations", {

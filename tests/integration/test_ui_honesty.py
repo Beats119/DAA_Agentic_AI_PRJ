@@ -282,3 +282,21 @@ def test_report_html_no_grade_matches_json_none():
     assert '<div class="grade-value">—</div>' in html
     assert "No grade computed for this run" in html
     assert not re.search(r'class="grade-value">\d', html)
+
+
+def test_new_evaluation_selects_are_not_browser_required(client):
+    """Regression (user report, 2026-10-20): the assignment/submission
+    selects are either/or with the upload fields — marking them
+    ``required`` made the browser block submission with "Please select
+    an item in the list" even when files were uploaded. The JS performs
+    the either/or check with a readable message instead."""
+    c, _base = client
+    resp = c.get("/new")
+    assert resp.status_code == 200
+    html = resp.text
+    for field in ("assignment_id", "submission_id", "rules_id"):
+        m = re.search(rf'<select[^>]*name="{field}"[^>]*>', html)
+        assert m, f"select {field} missing"
+        assert "required" not in m.group(0), (
+            f"select {field} must not be browser-required (either/or field)"
+        )
