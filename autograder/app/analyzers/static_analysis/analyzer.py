@@ -2,7 +2,10 @@
 
 Primary: deterministic built-in checks (tool ``"builtin"``) — simple,
 explainable, never fabricated. Supplementary: cppcheck when installed
-(tool ``"cppcheck"``), merged and declared. If neither applies, the result is
+(tool ``"cppcheck"``), merged and declared. cppcheck parses UNTRUSTED
+source, so it runs inside the sandbox executor (compiler seccomp
+profile, Landlock read access to the source directory only) — never as
+a bare host subprocess. If neither applies, the result is
 ``unsupported`` — never a silent perfect score.
 
 Score: 1.0 - sum(severity penalties), floored at ``score_floor``.
@@ -11,10 +14,10 @@ Score: 1.0 - sum(severity penalties), floored at ``score_floor``.
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from ...sandbox.executor import ExecLimits
 from ..base import AnalyzerContext, build_result
 from .checks import SEVERITY_PENALTY, StaticFinding, run_builtin_checks
 
@@ -28,22 +31,35 @@ DEFAULTS = {
 }
 
 
-def _run_cppcheck(source_path: str, timeout_s: float) -> list[StaticFinding] | None:
-    """Run cppcheck if installed. Returns None when unavailable (not an error)."""
+def _run_cppcheck(source_path: str, timeout_s: float, executor: Any) -> list[StaticFinding] | None:
+    """Run cppcheck if installed, inside the sandbox.
+
+    Returns None when cppcheck is unavailable, no executor was provided
+    (cppcheck is never run unsandboxed), or the sandboxed run fails /
+    times out (not an analyzer error — the built-in checks still ran).
+    """
     exe = shutil.which("cppcheck")
-    if exe is None:
+    if exe is None or executor is None:
         return None
+    read_paths = [str(Path(source_path).parent)]
+    # cppcheck loads its cfg files relative to the install prefix.
+    for cfg_dir in (str(Path(exe).resolve().parent.parent / "share" / "cppcheck"), "/usr/share/cppcheck"):
+        if Path(cfg_dir).is_dir():
+            read_paths.append(cfg_dir)
     try:
-        proc = subprocess.run(
+        result = executor.run(
             [exe, "--enable=warning,performance", "--quiet", "--template={line}:{severity}:{id}:{message}", source_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
+            "",
+            ExecLimits(wall_time_s=timeout_s, cpu_time_s=timeout_s + 30.0, output_bytes=2_000_000),
+            read_paths=read_paths,
+            seccomp_profile="compiler",
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except Exception:
+        return None
+    if result.timed_out:
         return None
     findings: list[StaticFinding] = []
-    for line in (proc.stderr or "").splitlines():
+    for line in (result.stderr or "").splitlines():
         parts = line.split(":", 3)
         if len(parts) != 4:
             continue
@@ -81,7 +97,7 @@ def analyze(ctx: AnalyzerContext) -> Any:
     cppcheck_findings: list[StaticFinding] = []
     cppcheck_status = "not_attempted"
     if params["use_cppcheck"]:
-        result = _run_cppcheck(ctx.source_path, float(params["cppcheck_timeout_s"]))
+        result = _run_cppcheck(ctx.source_path, float(params["cppcheck_timeout_s"]), ctx.executor)
         if result is None:
             cppcheck_status = "unavailable"
         else:

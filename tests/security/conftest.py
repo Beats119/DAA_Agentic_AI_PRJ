@@ -27,8 +27,8 @@ def executor(tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def requires_landlock():
-    if landlock_abi_version() != 1:
-        pytest.skip("Landlock ABI v1 unavailable: filesystem-containment tests need it")
+    if landlock_abi_version() is None:
+        pytest.skip("Landlock unavailable: filesystem-containment tests need it")
 
 
 @pytest.fixture()
