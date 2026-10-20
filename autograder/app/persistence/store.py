@@ -21,7 +21,6 @@ import sqlite3
 import tempfile
 import threading
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import wraps
@@ -157,6 +156,12 @@ class RunStore:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.execute("PRAGMA foreign_keys = ON")
+            # WAL + busy_timeout: several RunStore instances (API process,
+            # workflow, CLI) may share one DB file. WAL lets readers proceed
+            # during writes and busy_timeout makes writers wait instead of
+            # failing with "database is locked" (D26).
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
 
@@ -307,12 +312,31 @@ class RunStore:
                 pass
         digest = "sha256:" + hashlib.sha256(data).hexdigest()
         now = _utcnow_iso()
-        self._conn.execute(
-            "INSERT INTO artifacts (run_id, name, path, sha256, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (run_id, safe, str(target), digest, now),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                "INSERT INTO artifacts (run_id, name, path, sha256, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (run_id, safe, str(target), digest, now),
+            )
+            self._conn.commit()
+        except Exception:
+            # Roll back the file so a failed insert never leaves an
+            # unreferenced artifact behind (orphan window, D26). A hard
+            # crash between replace and insert can still orphan a file;
+            # reconcile_orphan_files() removes those at startup. If another
+            # store instance won the race and inserted a row for this name,
+            # leave the file in place — it is referenced now.
+            self._conn.rollback()
+            row = self._conn.execute(
+                "SELECT 1 FROM artifacts WHERE run_id = ? AND name = ?",
+                (run_id, safe),
+            ).fetchone()
+            if row is None:
+                try:
+                    os.unlink(target)
+                except OSError:
+                    pass
+            raise
         return ArtifactRecord(run_id, safe, str(target), digest, now)
 
     @_synchronized
@@ -333,6 +357,106 @@ class RunStore:
             (run_id,),
         ).fetchall()
         return [ArtifactRecord(**{k: r[k] for k in r.keys()}) for r in rows]
+
+    # -- integrity ------------------------------------------------------
+    @_synchronized
+    def verify_artifact(self, run_id: str, name: str) -> bool:
+        """True iff the artifact's bytes on disk hash to the recorded digest.
+
+        Detects tampering, truncation, and files that were never fully
+        persisted. Missing rows or missing files verify as False.
+        """
+        import hashlib
+
+        row = self._conn.execute(
+            "SELECT path, sha256 FROM artifacts WHERE run_id = ? AND name = ?",
+            (run_id, self._safe_name(name)),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            data = Path(row["path"]).read_bytes()
+        except OSError:
+            return False
+        return "sha256:" + hashlib.sha256(data).hexdigest() == row["sha256"]
+
+    @_synchronized
+    def verify_run_artifacts(self, run_id: str) -> dict[str, bool]:
+        """Verify every recorded artifact of a run: ``{name: ok}``."""
+        return {
+            rec.name: self.verify_artifact(run_id, rec.name)
+            for rec in self.list_artifacts(run_id)
+        }
+
+    # -- startup recovery -------------------------------------------------
+    @_synchronized
+    def recover_interrupted_runs(
+        self, before: str | None = None, reason: str = "interrupted by restart"
+    ) -> list[str]:
+        """Fail every non-terminal run last updated before ``before``.
+
+        A run still in a non-terminal state at process startup belongs to a
+        process that died mid-evaluation; leaving it "running" forever
+        would mislead clients. Each recovered run gets an
+        ``interrupted.txt`` artifact recording the reason, then transitions
+        to ``failed`` (an allowed edge from every non-terminal state).
+        ``before`` defaults to now; pass an earlier timestamp to only
+        recover runs untouched since then. Returns recovered run ids.
+        """
+        cutoff = before or _utcnow_iso()
+        rows = self._conn.execute(
+            "SELECT id FROM runs WHERE state NOT IN (?, ?, ?, ?) AND updated_at < ?",
+            (*sorted(TERMINAL_STATES), cutoff),
+        ).fetchall()
+        recovered: list[str] = []
+        for row in rows:
+            rid = row["id"]
+            try:
+                self.write_artifact(
+                    rid, "interrupted.txt",
+                    f"run interrupted: {reason}\n".encode(),
+                )
+            except Exception:
+                pass  # recovery of the state matters more than the note
+            try:
+                self.transition_run(rid, "failed")
+                recovered.append(rid)
+            except PersistenceError:
+                continue
+        return recovered
+
+    @_synchronized
+    def reconcile_orphan_files(self) -> int:
+        """Delete artifact files that no DB row references; return the count.
+
+        Closes the crash window in write_artifact (file replaced, process
+        died before the insert committed). Only files inside a known run's
+        directory are considered; unknown directories are left untouched.
+        Safe to call at startup before serving.
+        """
+        removed = 0
+        known = {
+            r["id"] for r in self._conn.execute("SELECT id FROM runs").fetchall()
+        }
+        if not self.artifact_root.exists():
+            return 0
+        for run_dir in self.artifact_root.iterdir():
+            if not run_dir.is_dir() or run_dir.name not in known:
+                continue
+            referenced = {
+                rec.name for rec in self.list_artifacts(run_dir.name)
+            }
+            for path in sorted(run_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(run_dir).as_posix()
+                if rel not in referenced:
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        return removed
 
     @_synchronized
     def close(self) -> None:

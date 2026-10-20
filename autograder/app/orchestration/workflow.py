@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import shutil
 import tempfile
 import traceback
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,6 @@ from ..persistence.store import RunStore
 from ..reporting.schemas import validate_report
 from ..rules.loader import load_rules
 from ..rules.versioning import hash_rules
-from ..sandbox import compiler as sandbox_compiler
 from ..sandbox.compiler import CompileResult, compile_c
 from ..sandbox.executor import (
     SANDBOX_VERSION,
@@ -226,8 +226,19 @@ def evaluate(
     max_workers: int = 4,
     evaluation_timeout_s: float = 1800.0,
     store: RunStore | None = None,
+    feedback_llm_check: bool | None = None,
 ) -> RunResult:
-    """Run one full evaluation. See the module docstring for the flow."""
+    """Run one full evaluation. See the module docstring for the flow.
+
+    ``feedback_llm_check`` enables the OPTIONAL supplementary LLM audit
+    of feedback drafts (default off; when None it is resolved from the
+    ``AUTOGRADER_FEEDBACK_LLM_CHECK`` env var). The deterministic
+    verifier remains authoritative either way.
+    """
+    if feedback_llm_check is None:
+        feedback_llm_check = os.environ.get(
+            "AUTOGRADER_FEEDBACK_LLM_CHECK", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
     run_id = run_id or uuid.uuid4().hex
     artifacts_base = Path(base_dir or Path.cwd() / "artifacts")
     artifacts_base.mkdir(parents=True, exist_ok=True)
@@ -279,9 +290,9 @@ def evaluate(
     def _finish_aborted(state: str, reason: str) -> RunResult:
         limitations.append(reason)
         try:
-            finalized = registry.finalize()
+            registry.finalize()
         except Exception:
-            finalized = registry.all()
+            pass  # report below is built from registry.all() either way
         feedback = FeedbackText(
             summary=f"Evaluation ended as {state}: {reason}",
             per_failure=[],
@@ -695,15 +706,15 @@ def evaluate(
                                   for e in res.evidence_refs],
                 "findings": [_remap_text(f) for f in res.findings],
                 "warnings": [_remap_text(w) for w in res.warnings],
-                "limitations": [_remap_text(l) for l in res.limitations],
+                "limitations": [_remap_text(lim) for lim in res.limitations],
                 "diagnostics": _remap_diag(res.diagnostics),
             })
         results = remapped
         for name, res in results.items():
             for w in res.warnings:
                 warnings.append(f"[{name}] {w}")
-            for l in res.limitations:
-                limitations.append(f"[{name}] {l}")
+            for lim in res.limitations:
+                limitations.append(f"[{name}] {lim}")
 
         analyzer_statuses = {m.name: results[m.name].status
                              for m in rules.metrics if m.name in results}
@@ -753,6 +764,16 @@ def evaluate(
             uncertainty_notes=list(limitations),
             test_stats=test_stats,
             run_status=report_status,
+            llm_check=feedback_llm_check,
+            # D21: the verifier checks cited source lines against the
+            # real submission and metric-score claims against the scores
+            # the engine just computed (both read-only here).
+            source_lines=len(
+                source_bytes.decode("utf-8", errors="replace").splitlines()),
+            metric_scores={
+                m.name: (float(m.score) if m.score is not None else None)
+                for m in score_result.per_metric
+            },
         )
         feedback: FeedbackText = feedback_out["feedback"]
         for rec in feedback_out.get("generation_records", []):

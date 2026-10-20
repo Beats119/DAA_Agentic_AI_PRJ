@@ -21,12 +21,20 @@
 <table>
   <thead><tr><th>Capability</th><th>Available</th></tr></thead>
   <tbody>
-  {% for name, ok in sandbox.items() %}
-    <tr><td class="mono">{{ name }}</td><td>{% if ok %}<span class="badge badge-completed">yes</span>{% else %}<span class="badge badge-incomplete">no</span>{% endif %}</td></tr>
+  {% for row in sandbox_rows %}
+    <tr><td class="mono">{{ row.name }}</td><td>{% if row.kind == "bool" %}{% if row.value %}<span class="badge badge-completed">yes</span>{% else %}<span class="badge badge-incomplete">no</span>{% endif %}{% else %}<span class="mono">{{ row.value }}</span>{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table>
-<p class="muted small">Evaluations fail closed: untrusted code never runs without the minimum isolation bar (resource limits + process-group kill).</p>
+<p class="muted small">Capabilities are probed live on this host by performing each operation, never inferred from versions: the seccomp row means the real runtime filter was installed in a probe process and a prohibited syscall was denied with EPERM. Measured values (e.g. the Landlock ABI) are shown as measured.</p>
+
+<h3>Mandatory isolation policy</h3>
+{% if mandatory %}
+<p class="muted small">Evaluations fail closed: untrusted code never runs unless every mandatory mechanism can be established for the run.</p>
+<ul>{% for m in mandatory %}<li class="mono">{{ m }}</li>{% endfor %}</ul>
+{% else %}
+<p class="muted small">The sandbox policy could not be loaded{% if policy_error %} ({{ policy_error }}){% endif %}; evaluations will refuse to run untrusted code.</p>
+{% endif %}
 
 <h3>Versions</h3>
 <table class="kv">
