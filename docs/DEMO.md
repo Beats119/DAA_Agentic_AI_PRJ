@@ -1,18 +1,33 @@
 # Demo: End-to-End Evaluation Runs
 
-Two real evaluation runs executed 2026-10-20 on this VM via the CLI.
-No outputs were hand-written — both `report_*.json` files are the actual
-artifacts produced by the code.
+Two real evaluation runs executed 2026-10-20 on this VM via the CLI, and
+re-executed verbatim on 2026-10-20 after the audit remediation (sandbox
+2.0, scoring policy 1.1) with identical outcomes. No outputs were
+hand-written — both `report_*.json` files are the actual artifacts
+produced by the code (copies of `artifacts/runs/<run_id>/report.json`).
 
 ## What was run
 
+Run from the repository root with the project venv active (the two
+commands below are complete and runnable exactly as printed):
+
 ```bash
-python -m autograder.app.orchestration.run \
+.venv/bin/python -m autograder.app.orchestration.run \
   --assignment docs/demo/assignment_add.txt \
-  --source tests/fixtures/c/correct_add.c \   # and buggy_add.c
+  --source tests/fixtures/c/correct_add.c \
   --rules examples/rules/add.json \
   --no-llm --run-id demo_correct --base-dir docs/demo/artifacts
+
+.venv/bin/python -m autograder.app.orchestration.run \
+  --assignment docs/demo/assignment_add.txt \
+  --source tests/fixtures/c/buggy_add.c \
+  --rules examples/rules/add.json \
+  --no-llm --run-id demo_buggy --base-dir docs/demo/artifacts
 ```
+
+(If `docs/demo/artifacts/` already contains runs with these ids, remove
+that directory first — the artifact store refuses to overwrite finalized
+runs.)
 
 - **Assignment:** `docs/demo/assignment_add.txt` — synthetic "add two integers"
   spec with a worked example (2 3 → 5).

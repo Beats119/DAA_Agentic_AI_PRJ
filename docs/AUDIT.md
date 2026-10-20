@@ -25,6 +25,21 @@ PASS 69 · PARTIAL 45 · FAIL 7 · NOT_APPLICABLE 26 · UNVERIFIED 1 file row
 (`test_ollama_real.py`) plus the 6 environment-blocked items listed near
 the end of the matrix.
 
+**Post-remediation status (2026-10-20, Phases B–N — see the Resolution
+section at the end of this document):** all 28 registered defects
+(D1–D28) are resolved: **28 FIXED** (two with environment caveats noted
+in the register: D13's sandboxed cppcheck is unexercised on this VM
+because cppcheck is not installed; D24/D25 were closed by the Phase N
+documentation pass itself). All 7 FAIL matrix rows are eliminated
+(FAIL 7 → 0): `sandbox/landlock.py`, `sandbox/executor.py`,
+`testing/generation/budgets.py`, `analyzers/complexity/analyzer.py`,
+`orchestration/coordinator.py`, `docs/DEMO.md`, `requirements.lock`.
+The matrix below is preserved **unchanged** as the pre-fix record; the
+Resolution section is the authoritative after-state. Post-fix suite:
+**348 passed, 4 skipped, 0 failed** (the 4 skips remain the
+real-Ollama tests — still UNVERIFIED here, still the gate for the WSL
+machine).
+
 ---
 
 ## Verdicts on the 17 mandated checks
@@ -339,3 +354,68 @@ path is trusted-only); API-key concepts / external inference (none anywhere);
 report/engine reconciliation (sound, tolerances verified); artifact traversal
 via run ids or artifact names (regex + allowlist hold); persistence
 immutability (enforced in the store, tested).
+
+---
+
+## Resolution (post-remediation, Phases B–N, 2026-10-20)
+
+Every defect above was remediated in the phase the register assigned.
+Statuses: **FIXED** = implemented and covered by the cited test/evidence
+on this VM. The pre-fix matrix and register above are unchanged — this
+section is the after-state.
+
+| ID | Resolution | Phase | Evidence |
+|----|-----------|-------|----------|
+| D1 | **FIXED** — Landlock default is now a narrow allowlist (run dir + system lib dirs + `/dev/null`); reads of `/etc/shadow`, SSH keys, and planted secrets outside the run dir are denied and tested. | B | `tests/security/test_read_isolation.py`, `test_symlink_escape.py` |
+| D2 | **FIXED** — `preexec_fn` eliminated; a dedicated single-threaded launcher process applies limits/namespaces/Landlock/seccomp, then execs. Children drop to uid/gid 65534 whenever the app runs as root, so `RLIMIT_NPROC` binds. | B | `tests/security/test_identity.py`, `test_policy_fail_closed.py` |
+| D3 | **FIXED** — network namespace is mandatory: launcher fails (exit 125) before exec if `unshare(CLONE_NEWNET)` fails; enforcement is reported from the launcher, not probes. | B | `tests/security/test_network_mandatory.py` |
+| D4 | **FIXED** — restrictive seccomp BPF allowlists installed (separate `runtime`/`compiler` profiles, deny-by-default EPERM); the capability probe now installs the real filter and requires `socket()` → EPERM before reporting `seccomp: true`. | B | `tests/security/test_seccomp.py` |
+| D5 | **FIXED** — thread pool deleted; each analyzer runs in its own subprocess with a hard per-analyzer deadline (TERM → grace → KILL its process group) plus an overall evaluation timeout (default 1800 s); a killed worker's sandbox descendants are reaped via a `/proc` descendant scan. | E | `tests/integration/test_coordinator_deadlines.py` (hang, crash, malformed output, orphan-kill, overall deadline) |
+| D6 | **FIXED** — scoring policy **1.1**: zero eligible evidence → grade `None`, status `incomplete`, explicit reason; a confirmed zero (eligible metrics scored 0) still yields 0.0. The unit test that pinned the old 0.0 was updated to pin the new semantics. | C | `tests/unit/test_scoring_properties.py` |
+| D7 | **FIXED** — `MetricScore`/`ReportMetric` carry both `configured_weight` and `effective_weight`; `validate_report` reconciles against effective weights and checks configured weights against the rules; HTML shows both columns. | C | `tests/unit/test_report.py`, `tests/integration/test_ui_honesty.py` (JSON↔HTML identity) |
+| D8 | **FIXED** — `ReferenceSolutionOracle.prepare()` tracks example coverage; a reference with no spec examples reproduced is capped at `provisional` with the limitation recorded; validated mismatches downgrade as before. | D | `tests/integration/test_generation_oracle.py` |
+| D9 | **FIXED** — the `ctx.reference_executor` assess path now compares the reference's output against the candidate's expected output through the shared comparison helper; no trust without comparison anywhere. | D | `tests/integration/test_generation_oracle.py`, `tests/security/test_oracle_sandbox.py` |
+| D10 | **FIXED** — `BudgetTracker` is enforced: token usage accumulates from gateway responses (checked before each generation round), and one shared per-run execution budget is charged *before* oracle/correctness executions; exhaustion stops work and is disclosed, never silently scored. | D | `tests/integration/test_generation_oracle.py`, `tests/unit/test_analyzers_correctness.py` |
+| D11 | **FIXED** — complexity with no required class is `inconclusive` (score `None`, limitation "no required complexity class specified"); the manufactured 1.0 default is removed. | G | `tests/unit/test_analyzers_complexity.py` |
+| D12 | **FIXED** — memory-safety results disclose both the disabled address-space limit (with the compensating ASan RSS cap) and `detect_leaks=0` (leaks not checked); a submission that fails the sanitizer build is `failed`, distinct from toolchain-`unsupported`. | G | `tests/unit/test_analyzers_memory.py` |
+| D13 | **FIXED (code)** — cppcheck now runs through the sandbox executor (compiler profile), never as a bare host subprocess, and results state cppcheck's true outcome. *Caveat: cppcheck is not installed on this VM, so the sandboxed cppcheck path is implemented but unexercised here.* | B/G | `tests/unit/test_analyzers_static.py` (outcome states via stub executor) |
+| D14 | **FIXED** — an empty LLM review, or one missing rubric dimensions, is `inconclusive`; no more `completed` 0.0 or subset averaging. | G | `tests/unit/test_analyzers_readability.py` |
+| D15 | **FIXED** — correctness classifies each run `run_ok` vs `infra_error`; infra-failed tests are excluded from the pass/fail fraction, counted in `infra_errors`, and warned about; all-infra → `inconclusive`. | G | `tests/unit/test_analyzers_correctness.py` |
+| D16 | **FIXED** — the spec-degradation warning is attached only when the spec is genuinely missing after extraction; successful LLM runs no longer carry the false "no specification available" limitation. | E | `tests/integration/test_orchestration.py` (asserted both directions) |
+| D17 | **FIXED** — uploads stream in 64 KB chunks to a temp file with the cap enforced during the write (413 the moment it is exceeded), plus an ASGI guard bounding concurrent uploads (429) and total in-flight bytes; temp files are removed on every failure path. | F | `tests/integration/test_api_hardening.py` |
+| D18 | **FIXED** — YAML rules uploads keep their `.yaml` extension and work end-to-end (upload → list → evaluation); the silent-rename bug is gone. | F | `tests/integration/test_api_hardening.py` |
+| D19 | **FIXED** — client-visible error text is sanitized (no absolute paths, no tracebacks; structured `{error: {code, message}}`); `meta.json` writes are locked + atomic; missing upload files return 404 instead of 500. | F | `tests/integration/test_api_hardening.py` |
+| D20 | **FIXED** — manifests are written at finalize with terminal state + `finished_at`; version strings come from constants/probes (`POLICY_VERSION`, `SANDBOX_VERSION`, probed compiler, real Python version); generation provenance records the actual model id + prompt version (or honestly "none (llm unavailable)"). Demo artifacts were regenerated under the fixed code. | E | `tests/integration/test_orchestration.py`; `docs/demo/` artifacts |
+| D21 | **FIXED** — `verify_feedback` also validates cited source locations against the submission's line count and metric-score claims against the scoring engine's per-metric results; violations feed the existing bounded-regeneration/fallback path. | I | `tests/unit/test_feedback_verification.py` |
+| D22 | **FIXED** — `.env.example` lists exactly the variables the code reads (`OLLAMA_URL`, `ARTIFACT_DIR`, `AUTOGRADER_SANDBOX_POLICY`, `AUTOGRADER_FEEDBACK_LLM_CHECK`); the `feedback_check` prompt/task is wired as an optional, default-off LLM audit that can only trigger regeneration; stub packages `app/evidence/`, `app/agents/` and the empty root dirs are deleted. | G/H/K | `tests/unit/test_feedback_llm_check.py`; `.env.example` |
+| D23 | **FIXED** — `requirements.lock` regenerated portable (42 pinned packages, no local paths, no editable self-reference); `pytest` moved to the dev extra; templates/static declared as package data. Proven: fresh venv installed purely from the lock runs the unit suite green (236 passed). | K | `docs/INSTALL.md` (documented sequence + proof) |
+| D24 | **FIXED** — documentation re-walked against the remediated code: `docs/SANDBOX.md` rewritten in Phase B; `docs/ACCEPTANCE.md` rewritten with evidence-bound statuses (this pass); `docs/ARCHITECTURE.md`, `docs/HANDOFF.md`, `docs/INSTALL.md`, `docs/LIMITATIONS.md`, `README.md` corrected. No unconditional PASS remains without an evidence pointer. | B–N | `docs/ACCEPTANCE.md` (status key + per-item evidence) |
+| D25 | **FIXED** — DEMO.md now prints two complete, runnable commands; both were re-executed verbatim on 2026-10-20 and reproduce the documented outcomes exactly (statuses, grade `None`, 16 uncertainty entries, 7 limitations, per-analyzer statuses). | N | `docs/DEMO.md` + regenerated `docs/demo/` artifacts |
+| D26 | **FIXED** — SQLite WAL + `busy_timeout`; the API shares one `RunStore` with the workflow; artifact writes roll back on insert failure and orphaned files are reconciled at startup; `recover_interrupted_runs()` fails runs left non-terminal by a restart. | F | `tests/unit/test_persistence.py`, `tests/integration/test_api_hardening.py` (restart test) |
+| D27 | **FIXED** — the gateway sends the configured `max_tokens` as Ollama `num_predict`; the residual `_DEFAULTS["model"] = "llama3.1"` literal in `ollama/models.py` is unreachable, because the loader raises unless the YAML task entry itself names a model (which then overrides the default). | D | `tests/integration/test_ollama_gateway.py` (request body asserts `num_predict`) |
+| D28 | **FIXED** — `append_blob` writes the blob, reads it back, and cites the hash of the persisted bytes; failures raise instead of minting a record; `verify_blob`/`verify_run_artifacts` detect tampering or deletion. | F | `tests/unit/test_evidence_blob.py` |
+
+### Known residuals (not in the D-register; recorded honestly)
+
+- **Specification truncation is still silent**: `specification/agent.py`
+  renders at most 12 000 chars of the assignment into the extraction
+  prompt and does not record the truncation in
+  `extraction_diagnostics` (a matrix-row minor from the pre-fix audit,
+  never promoted to the register). A very long assignment can therefore
+  yield a thinner spec than the document supports, with no signal in the
+  report.
+- **Cross-worker exec-budget overshoot**: analyzer workers enforce the
+  execution budget against their seeded snapshot and the coordinator
+  reconciles deltas afterwards, so concurrent workers can collectively
+  overshoot before reconciliation. Today only correctness charges
+  executions among analyzers, so the analyzer phase has a single
+  consumer; the caveat is documented in code and in
+  `docs/LIMITATIONS.md`.
+- **Modularity blind spot**: macro-*generated* functions are invisible
+  to the regex parser entirely (not even counted as candidates), so
+  `parse_confidence` can read 1.0 while functions are missed. The
+  analyzer's limitation text covers this approximately; a real fix needs
+  a real C parser.
+- **cppcheck / real-LLM / WSL2 behavior**: unchanged from the pre-fix
+  "Environment-blocked" table — those items remain UNVERIFIED on this
+  VM and are gated on the target machine (see `docs/OLLAMA.md`).
