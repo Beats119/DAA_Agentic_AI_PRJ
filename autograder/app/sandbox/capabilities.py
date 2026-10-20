@@ -5,25 +5,29 @@ what actually worked. Nothing is assumed from the kernel version or the
 presence of a binary — a capability is reported available only if the
 operation succeeds end to end.
 
+Semantics after the Phase-B overhaul:
+
+- ``seccomp`` means a REAL restrictive filter (the runtime profile) was
+  installed in a probe child AND a prohibited syscall (``socket``) was
+  denied with ``EPERM`` while a permitted one still worked. It does NOT
+  merely mean "the seccomp mechanism exists".
+- ``landlock_abi`` is the REAL ABI version reported by the kernel (via
+  ``LANDLOCK_CREATE_RULESET_VERSION``); the policy driver grants rules
+  with the ABI-v1 rights subset (``landlock_driver_abi``), while the
+  handled mask covers every FS right the kernel mediates.
+
 Probes are best-effort and never raise: an inconclusive probe reports False.
 """
 
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import shutil
-import struct
-import subprocess
 import sys
 
 from ..core.schemas import StrictModel
-
-# Landlock syscall numbers (x86_64 / aarch64 share these).
-_SYS_LANDLOCK_CREATE_RULESET = 444
-_SYS_LANDLOCK_ADD_RULE = 445
-_SYS_LANDLOCK_RESTRICT_SELF = 446
-_LANDLOCK_RULE_PATH_BENEATH = 1
 
 
 class SandboxCapabilities(StrictModel):
@@ -34,7 +38,8 @@ class SandboxCapabilities(StrictModel):
     seccomp: bool = False
     cgroup_v2: bool = False
     resource_limits: bool = False
-    landlock_abi: int | None = None  # Landlock ABI version, if the kernel supports it
+    landlock_abi: int | None = None  # REAL Landlock ABI version reported by the kernel
+    landlock_driver_abi: int = 1  # rights subset the policy driver grants rules with
     compiler: str | None = None  # absolute path to gcc/clang, if present
 
 
@@ -85,22 +90,26 @@ def _probe_network_namespace() -> bool:
 
 
 def _probe_seccomp() -> bool:
-    """Can this process install a (trivial allow-all) seccomp filter?
+    """Can this host install the REAL runtime filter — and does it bite?
 
-    This only proves the *mechanism* exists; the sandbox does not currently
-    install syscall filters (Landlock + netns + rlimits cover the policy).
+    Installs the production runtime profile in a probe child, then
+    requires that ``socket()`` is denied with EPERM while an allowed
+    syscall (``getpid``) still succeeds. Anything less is not reported
+    as seccomp capability: mechanism-presence is not enforcement.
     """
 
     def _try() -> None:
+        from .seccomp import install_filter
+
+        install_filter("runtime")
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        PR_SET_SECCOMP = 22
-        SECCOMP_MODE_FILTER = 2
-        # BPF: single RET_ALLOW instruction.
-        prog = struct.pack("HBBI", 6, 0, 0, 0x7FFF0000)
-        buf = ctypes.create_string_buffer(prog)
-        fprog = struct.pack("HQ", 1, ctypes.addressof(buf))
-        if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, fprog) != 0:
-            raise OSError("prctl(PR_SET_SECCOMP) failed")
+        fd = libc.socket(2, 1, 0)  # AF_INET, SOCK_STREAM — not in the profile
+        if fd >= 0:
+            os.close(fd)
+            raise OSError("socket() succeeded under the runtime seccomp filter")
+        if ctypes.get_errno() != errno.EPERM:
+            raise OSError("socket() was denied, but not with EPERM")
+        os.getpid()  # an allowed syscall must still work
 
     return _in_child(_try)
 
@@ -127,29 +136,10 @@ def _probe_resource_limits() -> bool:
 
 
 def _probe_landlock() -> int | None:
-    """Return the supported Landlock ABI version, or None.
+    """Return the REAL Landlock ABI version reported by the kernel, or None."""
+    from .landlock import landlock_abi_version
 
-    Probes ABI versions from newest to oldest by creating a ruleset with the
-    version's attr size. Only versions we know how to drive are returned.
-    """
-    from .landlock import _HANDLED_V1
-
-    libc = ctypes.CDLL("libc.so.6", use_errno=True)
-
-    def _try_abi(attr_size: int) -> bool:
-        def _try() -> None:
-            attr = struct.pack("Q", _HANDLED_V1)[:attr_size].ljust(attr_size, b"\0")
-            fd = libc.syscall(_SYS_LANDLOCK_CREATE_RULESET, attr, attr_size, 0)
-            if fd < 0:
-                raise OSError("landlock_create_ruleset failed")
-            os.close(fd)
-
-        return _in_child(_try)
-
-    # ABI v1 attr is a single u64 (handled_access_fs).
-    if _try_abi(8):
-        return 1
-    return None
+    return landlock_abi_version()
 
 
 def probe_capabilities() -> SandboxCapabilities:

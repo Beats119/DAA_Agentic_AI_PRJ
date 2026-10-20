@@ -2,14 +2,25 @@
 
 Compiling student code is itself an untrusted operation (a malicious source
 can exploit compiler bugs or simply hang the compiler), so the compiler runs
-under the same sandbox policy with generous limits. ``TMPDIR`` is pointed at
-the run directory because the Landlock policy denies writes to ``/tmp``.
+under the same sandbox policy (Phase-B mandatory policy, seccomp "compiler"
+profile) with generous limits. ``TMPDIR`` is pointed inside the output
+directory because the Landlock policy denies writes elsewhere.
+
+The source file is *staged* (copied) into the output directory before
+compilation: when the application runs as root, the sandboxed compiler runs
+as the unprivileged sandbox uid, which may be unable to read the original
+path (strict home directories, protected mounts). gcc's
+``-ffile-prefix-map`` rewrites the staged path back to the original in
+diagnostics and debug info, so reported file paths are unchanged. Sibling
+headers in the original directory are still found via the executor's
+``read_paths`` grant wherever the sandbox identity may read them.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -112,8 +123,20 @@ def compile_c(
     tmpdir = out / "tmp"
     tmpdir.mkdir(exist_ok=True)
 
+    staged = out / source.name
+    if staged.resolve() != source:
+        shutil.copyfile(source, staged)
+
     binary = out / f"{source.stem}_{uuid.uuid4().hex[:8]}"
-    argv = [config.compiler, f"-std={config.std}", *config.flags, str(source), "-o", str(binary)]
+    argv = [
+        config.compiler,
+        f"-std={config.std}",
+        *config.flags,
+        f"-ffile-prefix-map={out}={source.parent}",
+        str(staged),
+        "-o",
+        str(binary),
+    ]
     start = time.monotonic()
     result = executor.run(
         argv,
@@ -121,6 +144,12 @@ def compile_c(
         limits or CompilerLimits(),
         extra_env={"TMPDIR": str(tmpdir)},
         writable_paths=[str(out)],
+        # The compiler runs under the "compiler" seccomp profile and needs
+        # Landlock read access to the source's directory plus the toolchain
+        # dirs not covered by the runtime policy paths (/usr/bin for as/ld,
+        # /usr/include for headers). Missing dirs are skipped by the executor.
+        read_paths=[str(source.parent), "/usr/bin", "/usr/include", "/usr/libexec"],
+        seccomp_profile="compiler",
     )
     wall_s = time.monotonic() - start
 
