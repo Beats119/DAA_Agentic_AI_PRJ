@@ -29,8 +29,8 @@ server-rendered Jinja2 templates; every workflow is also a REST endpoint.
         |
  +-- Ollama gateway (loopback-only): spec, test-gen, refinement,
  |      code review, feedback drafting
- +-- Secure sandbox: Landlock fs containment, netns, rlimits,
- |      process-group kill, output caps — fail closed
+ +-- Secure sandbox: Landlock fs allowlist, mandatory netns, seccomp
+ |      filter, rlimits, privilege drop, process-group kill — fail closed
  +-- 8 analyzers: correctness, compiler, static_analysis, modularity,
  |      complexity, memory_safety, readability, similarity
  +-- Evidence registry (typed, immutable) + SQLite index + artifacts dir
@@ -61,11 +61,12 @@ Docs: [docs/PLAN.md](docs/PLAN.md) (governing spec) ·
 ## Quickstart
 
 ```bash
-# 1. Install (Python 3.11+, gcc required)
-pip install -e .
+# 1. Install (Python 3.11+, gcc required; deps pinned in requirements.lock)
+pip install -r requirements.lock
+pip install -e . --no-deps
 
 # 2. Configure (optional)
-cp .env.example .env   # OLLAMA_URL, ARTIFACT_DIR, DB_PATH, SANDBOX_POLICY
+cp .env.example .env   # OLLAMA_URL, ARTIFACT_DIR, AUTOGRADER_SANDBOX_POLICY
 
 # 3. Start the web app
 python -m autograder.app.api.main --port 8000
@@ -92,7 +93,7 @@ autograder/app/
   core/           Pydantic schemas (rules, spec, tests, evidence, report)
   rules/          loading, validation, versioning, hashing
   persistence/    SQLite store + artifact layout
-  scoring/        deterministic scoring engine (policy 1.0)
+  scoring/        deterministic scoring engine (policy 1.1)
   reporting/      report schema validation / reconciliation
   ingestion/      assignment PDF/text ingestion
   specification/  spec-extraction agent
@@ -100,8 +101,7 @@ autograder/app/
   testing/        generation, candidate validation, tiered oracle
   sandbox/        capabilities probe, Landlock/netns/rlimit executor, compiler
   analyzers/      8 analyzers with a common typed contract
-  orchestration/  planner, coordinator, workflow, evidence, feedback, CLI runner
-  evidence/       evidence registry types
+  orchestration/  planner, coordinator, workflow, evidence registry, feedback, CLI runner
 configs/          models.yaml (task -> model), app settings
 prompts/          versioned LLM prompt assets (v1.0)
 examples/rules/   annotated example rules (add.json)
@@ -116,7 +116,7 @@ pytest tests/unit tests/integration tests/security   # full suite
 pytest tests/unit                                     # fast subset
 ```
 
-Current state: **203 passed, 4 skipped** (the 4 skips are real-Ollama
+Current state: **348 passed, 4 skipped** (the 4 skips are real-Ollama
 tests; they run on a machine with Ollama). See [docs/TESTING.md](docs/TESTING.md).
 
 ## Status

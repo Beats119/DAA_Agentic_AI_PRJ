@@ -5,8 +5,15 @@ what actually worked. Nothing is assumed from the kernel version or the
 presence of a binary — a capability is reported available only if the
 operation succeeds end to end.
 
-Semantics after the Phase-B overhaul:
+Semantics after the Phase-B overhaul (strategy-aware since sandbox-2.1):
 
+- ``network_namespace`` / ``user_namespaces`` test the EXACT sequence
+  the launcher will perform at the current euid: as root, a bare
+  ``unshare(CLONE_NEWNET)`` (resp. the rootless sequence); unprivileged,
+  the rootless sequence — ``unshare(CLONE_NEWUSER | CLONE_NEWNET)``
+  plus setgroups/uid_map/gid_map writes. A host that forbids
+  unprivileged user namespaces (e.g. Ubuntu's AppArmor restriction)
+  honestly reports False here, and the executor then refuses to run.
 - ``seccomp`` means a REAL restrictive filter (the runtime profile) was
   installed in a probe child AND a prohibited syscall (``socket``) was
   denied with ``EPERM`` while a permitted one still worked. It does NOT
@@ -56,37 +63,57 @@ def _in_child(fn) -> bool:
     return os.waitstatus_to_exitcode(status) == 0
 
 
-def _probe_user_namespaces() -> bool:
-    """unshare(CLONE_NEWUSER) *and* a writable uid_map.
+def _rootless_userns_sequence() -> None:
+    """The EXACT setup the launcher's rootless strategy performs.
 
-    Creating the namespace alone is not enough: without an id map the child
-    runs as the overflow uid and cannot do anything useful. Both must work.
+    Raises on any failure. The outer uid/gid MUST be captured before
+    ``unshare``: once CLONE_NEWUSER takes effect, ``getuid()`` reports
+    the overflow uid (65534) until a uid_map is written, so reading the
+    ids afterwards would build a map for the wrong outer identity.
+    (This ordering bug is why the previous probe reported False on
+    hosts where the sequence actually works.)
     """
+    uid, gid = os.getuid(), os.getgid()
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
+    try:
+        with open("/proc/self/setgroups", "w") as fh:
+            fh.write("deny")
+    except FileNotFoundError:
+        pass  # kernels without the setgroups file
+    with open("/proc/self/uid_map", "w") as fh:
+        fh.write(f"0 {uid} 1")
+    with open("/proc/self/gid_map", "w") as fh:
+        fh.write(f"0 {gid} 1")
+    # Verify the map really took effect: we must be uid 0 inside now.
+    if os.getuid() != 0:
+        raise OSError("uid_map did not take effect")
 
-    def _try() -> None:
-        os.unshare(os.CLONE_NEWUSER)
-        uid, gid = os.getuid(), os.getgid()
-        try:
-            with open("/proc/self/setgroups", "w") as fh:
-                fh.write("deny")
-        except OSError:
-            pass  # kernels without setgroups file
-        with open("/proc/self/uid_map", "w") as fh:
-            fh.write(f"0 {uid} 1\n")
-        with open("/proc/self/gid_map", "w") as fh:
-            fh.write(f"0 {gid} 1\n")
-        # Verify the map really stuck (reads back non-empty).
-        if not open("/proc/self/uid_map").read().strip():
-            raise OSError("uid_map did not stick")
 
-    return _in_child(_try)
+def _probe_user_namespaces() -> bool:
+    """Can the rootless user-namespace sequence complete here?
+
+    This is the mechanism the rootless launcher strategy depends on
+    (and the only way an unprivileged process can own a netns).
+    Reported independently of euid: it also completes as root.
+    """
+    return _in_child(_rootless_userns_sequence)
 
 
 def _probe_network_namespace() -> bool:
-    def _try() -> None:
-        os.unshare(os.CLONE_NEWNET)
+    """Can the launcher create its network namespace at THIS euid?
 
-    return _in_child(_try)
+    Root creates one directly. An unprivileged launcher can only get a
+    netns via the rootless user-namespace sequence — so that is what is
+    probed. The probe therefore predicts the launcher, not the kernel
+    in the abstract.
+    """
+    if os.geteuid() == 0:
+
+        def _try() -> None:
+            os.unshare(os.CLONE_NEWNET)
+
+        return _in_child(_try)
+    return _in_child(_rootless_userns_sequence)
 
 
 def _probe_seccomp() -> bool:

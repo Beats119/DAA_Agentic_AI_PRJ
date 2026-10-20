@@ -17,13 +17,34 @@ Protocol: the parent writes a JSON spec (argv, cwd, env, limits, policy,
 landlock rules, status fd) to a file and passes the status pipe's write
 end via ``pass_fds``. The launcher applies, IN ORDER:
 
-a. ``unshare(CLONE_NEWNET)`` — network namespace. Failure is fatal when
-   ``network_namespace`` is mandatory (it is by default).
+a. Namespace + identity setup, by strategy:
+
+   - ``root-setuid`` (our euid is 0): ``unshare(CLONE_NEWNET)`` directly
+     — root may create a network namespace outright. The identity drop
+     itself happens at step (c).
+   - ``rootless-userns`` (any other euid — the normal deployment, e.g.
+     the instructor's own account on WSL): a bare ``CLONE_NEWNET``
+     unshare is EPERM for unprivileged users, so instead
+     ``unshare(CLONE_NEWUSER | CLONE_NEWNET)`` creates both namespaces
+     in one call — the netns is owned by the new user namespace, which
+     is exactly what makes it creatable unprivileged. Then
+     ``/proc/self/setgroups`` = "deny" (ignored only if the file does
+     not exist), ``/proc/self/uid_map`` = ``0 <euid> 1`` and
+     ``/proc/self/gid_map`` = ``0 <egid> 1``: inside the namespace the
+     process is uid 0, on the host it remains the unprivileged app
+     user. Any failure here is ``failed_step="user_namespace"`` and
+     exit 125 — fail closed, exactly like every other mandatory step.
+     Some hosts forbid even this (e.g. Ubuntu's AppArmor
+     ``kernel.apparmor_restrict_unprivileged_userns=1``); then no
+     evaluation runs at all — the sandbox never falls back to host
+     networking.
 b. rlimits (CPU / AS / FSIZE / NPROC / STACK, core dumps off).
-c. Identity drop — when running as root and the policy says so:
-   ``setgroups([])``, ``setgid``, ``setuid`` to the sandbox identity, then
-   verify the process is no longer root. When not root, the uid is kept
-   and reported honestly (``uid_dropped=False, reason="not root"``).
+c. Identity drop — root strategy only, and only when the policy says
+   so: ``setgroups([])``, ``setgid``, ``setuid`` to the sandbox
+   identity, then verify the process is no longer root. The rootless
+   strategy never setuids (only the one mapped uid exists inside its
+   namespace); its status reports ``uid`` as the OUTER (host) uid,
+   plus ``uid_inner``/``uid_outer`` and ``strategy``.
 d. ``prctl(PR_SET_NO_NEW_PRIVS, 1)``.
 e. Landlock with the spec's allowlist rules (+ a read rule for the
    process's own ``/proc/self``, which sanitizers legitimately read;
@@ -34,10 +55,10 @@ f. The seccomp profile from the policy (default action: EPERM).
 It then writes ONE JSON status line to the status pipe (fd 3) —
 ``{"ok": true, "netns": ..., "landlock": ..., "seccomp": ...,
 "resource_limits": ..., "no_new_privs": ..., "uid": ...,
-"uid_dropped": ...}`` — and ``execve``s the target. Any mandatory step
-that fails produces ``{"ok": false, "failed_step": ..., "error": ...}``
-and exit code 125 BEFORE the target is exec'd: the target binary never
-runs uncontained.
+"uid_dropped": ..., "strategy": ...}`` — and ``execve``s the target.
+Any mandatory step that fails produces
+``{"ok": false, "failed_step": ..., "error": ...}`` and exit code 125
+BEFORE the target is exec'd: the target binary never runs uncontained.
 """
 
 from __future__ import annotations
@@ -132,15 +153,49 @@ def main(argv: list[str]) -> int:
                 fail("landlock_fs", exc)
             rule_fds = []
 
-    # a. Network namespace — mandatory by default; failure refuses the run.
+    # Our identity BEFORE any namespace games: after
+    # unshare(CLONE_NEWUSER), getuid() reports the overflow uid (65534)
+    # until a uid_map is written, so the outer ids must be captured now.
+    euid, egid = os.geteuid(), os.getegid()
+    strategy = "root-setuid" if euid == 0 else "rootless-userns"
+    uid_inner: int | None = None
+    uid_outer: int | None = None
+
+    # a. Namespace setup — the strategy depends on our privileges.
+    #    Root: a bare CLONE_NEWNET unshare succeeds outright.
+    #    Non-root: CLONE_NEWNET alone is EPERM (creating a netns needs
+    #    CAP_SYS_ADMIN in the CURRENT user namespace). Creating a user
+    #    namespace in the SAME unshare call makes the netns owned by
+    #    that new namespace, where we DO hold the capability — the
+    #    standard rootless-container pattern.
     netns = False
     if spec.get("want_netns", True):
-        try:
-            os.unshare(os.CLONE_NEWNET)
+        if euid == 0:
+            try:
+                os.unshare(os.CLONE_NEWNET)
+                netns = True
+            except OSError as exc:
+                if "network_namespace" in mandatory:
+                    fail("network_namespace", exc)
+        else:
+            try:
+                os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
+                try:
+                    with open("/proc/self/setgroups", "w") as fh:
+                        fh.write("deny")
+                except FileNotFoundError:
+                    pass  # kernels without the setgroups file
+                with open("/proc/self/uid_map", "w") as fh:
+                    fh.write(f"0 {euid} 1")
+                with open("/proc/self/gid_map", "w") as fh:
+                    fh.write(f"0 {egid} 1")
+            except OSError as exc:
+                # Mandatory in effect: without the namespace there is
+                # no network isolation for an unprivileged launcher.
+                # Fail closed (exit 125) rather than run on the host net.
+                fail("user_namespace", exc)
             netns = True
-        except OSError as exc:
-            if "network_namespace" in mandatory:
-                fail("network_namespace", exc)
+            uid_inner, uid_outer = 0, euid
     elif "network_namespace" in mandatory:
         fail("network_namespace", "executor configured without network namespace")
 
@@ -153,12 +208,15 @@ def main(argv: list[str]) -> int:
         if "resource_limits" in mandatory:
             fail("resource_limits", exc)
 
-    # c. Dedicated unprivileged identity. Dropping from root to the sandbox
-    #    uid also makes RLIMIT_NPROC meaningful (it is not enforced for
-    #    uid 0) and removes every capability the app user holds.
+    # c. Dedicated unprivileged identity (root strategy only). Dropping
+    #    from root to the sandbox uid also makes RLIMIT_NPROC meaningful
+    #    (it is not enforced for uid 0) and removes every capability the
+    #    app user holds. The rootless strategy never setuids: inside its
+    #    user namespace only the single mapped uid exists, and the
+    #    process already holds no privilege on the host.
     uid_dropped = False
     uid_drop_reason: str | None = None
-    if os.geteuid() == 0 and policy.get("drop_privileges_when_root", True):
+    if euid == 0 and policy.get("drop_privileges_when_root", True):
         try:
             os.setgroups([])
             os.setgid(int(policy["sandbox_gid"]))
@@ -168,8 +226,12 @@ def main(argv: list[str]) -> int:
         if os.getuid() == 0 or os.geteuid() == 0:
             fail("setuid", "process is still root after the identity drop")
         uid_dropped = True
-    elif os.geteuid() != 0:
-        uid_drop_reason = "not root"
+    elif euid != 0:
+        uid_drop_reason = (
+            "rootless user namespace: the child is uid 0 inside its own "
+            "user+network namespaces, mapped to the unprivileged app uid "
+            "on the host; no setuid is possible or needed"
+        )
     else:
         uid_drop_reason = "policy disabled the identity drop"
 
@@ -207,6 +269,10 @@ def main(argv: list[str]) -> int:
             fail("seccomp_filter", exc)
 
     # g. Report ACTUAL enforcement, then become the target program.
+    #    ``uid`` is the HOST-meaningful identity: for the rootless
+    #    strategy getuid() here would report the namespace-inner 0,
+    #    which would falsely read as "ran as host root" — report the
+    #    outer uid (with uid_inner/uid_outer alongside for full detail).
     status = {
         "ok": True,
         "netns": netns,
@@ -214,10 +280,14 @@ def main(argv: list[str]) -> int:
         "seccomp": seccomp_ok,
         "resource_limits": rlimits_ok,
         "no_new_privs": nnp,
-        "uid": os.getuid(),
+        "uid": uid_outer if uid_outer is not None else os.getuid(),
         "uid_dropped": uid_dropped,
         "uid_drop_reason": uid_drop_reason,
+        "strategy": strategy,
     }
+    if uid_inner is not None:
+        status["uid_inner"] = uid_inner
+        status["uid_outer"] = uid_outer
     os.write(status_fd, (json.dumps(status) + "\n").encode())
     try:
         os.close(status_fd)

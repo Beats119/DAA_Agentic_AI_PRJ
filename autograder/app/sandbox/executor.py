@@ -16,10 +16,17 @@ Design (Phase B; see docs/SANDBOX.md):
   ``no_new_privs``. If any mandatory step fails, the launcher exits 125
   before exec and the parent raises :class:`SandboxError` — the target
   never runs with weaker isolation.
-- Identity: when the application runs as root, the child drops to the
-  dedicated unprivileged ``sandbox_uid``/``sandbox_gid`` (default
-  ``nobody``/``nogroup``) before exec. This also makes ``RLIMIT_NPROC``
-  meaningful (it is not enforced for uid 0).
+- Identity (two strategies, chosen by the launcher from its euid):
+  ``root-setuid`` — when the application runs as root, the child drops
+  to the dedicated unprivileged ``sandbox_uid``/``sandbox_gid``
+  (default ``nobody``/``nogroup``) before exec; this also makes
+  ``RLIMIT_NPROC`` meaningful (it is not enforced for uid 0).
+  ``rootless-userns`` — when the application runs unprivileged (the
+  normal deployment), the launcher creates a user namespace together
+  with the network namespace and maps itself to uid 0 inside it, so
+  netns creation succeeds without root while the child remains the
+  unprivileged app user on the host. If the host forbids even that,
+  the run is refused — never silently downgraded.
 - Process containment: the launcher starts in its own session
   (``start_new_session=True``); on wall-clock timeout the parent kills
   the whole process group. stdout/stderr are pumped through a select
@@ -52,7 +59,7 @@ from .landlock import FS_EXECUTE, FS_READ_EXEC, FS_READ_FILE, FS_WRITE_FILE, fs_
 from .policy import KNOWN_CAPABILITIES, SandboxPolicy, load_policy
 from .seccomp import PROFILES
 
-SANDBOX_VERSION = "sandbox-2.0"
+SANDBOX_VERSION = "sandbox-2.1"
 
 #: Directories whose binaries are invoked in place (with a per-file
 #: Landlock execute rule) instead of being copied into the run directory.
@@ -127,6 +134,11 @@ class EnforcementReport(StrictModel):
     seccomp_filter: bool = False
     uid: int | None = None
     uid_dropped: bool = False
+    # Which identity/namespace strategy the launcher used:
+    # "root-setuid" (app ran as root, child setuid'd to the sandbox
+    # identity) or "rootless-userns" (app unprivileged, child is uid 0
+    # inside its own user namespace, mapped to ``uid`` on the host).
+    isolation_strategy: str | None = None
     # Legacy alias of landlock_fs (pre-Phase-B field name).
     filesystem_hardened: bool = False
     temp_dir: str = ""
@@ -180,6 +192,7 @@ class SandboxExecutor:
         self.policy = policy or load_policy()
         self._caps = probe_capabilities()
         self._self_test_ok: bool | None = None
+        self._self_test_error: str | None = None
 
     @property
     def capabilities(self) -> SandboxCapabilities:
@@ -230,8 +243,17 @@ class SandboxExecutor:
                     "executor was configured without it"
                 )
             if not caps.network_namespace:
+                if os.geteuid() == 0:
+                    raise SandboxUnavailable(
+                        "network namespaces are unavailable on this host — "
+                        "refusing to execute untrusted code with host networking"
+                    )
                 raise SandboxUnavailable(
-                    "network namespaces are unavailable on this host — "
+                    "network-namespace isolation is unavailable for this "
+                    "unprivileged user: creating one requires the rootless "
+                    "user-namespace path (CLONE_NEWUSER|CLONE_NEWNET plus a "
+                    "uid_map write), which this host does not permit (e.g. "
+                    "Ubuntu's AppArmor unprivileged-userns restriction) — "
                     "refusing to execute untrusted code with host networking"
                 )
         if "seccomp_filter" in mandatory and not caps.seccomp:
@@ -240,10 +262,11 @@ class SandboxExecutor:
                 "host — refusing to execute untrusted code unfiltered"
             )
         if not self._functional_self_test():
+            detail = f": {self._self_test_error}" if self._self_test_error else ""
             raise SandboxUnavailable(
                 "sandbox functional self-test failed (a trivial program "
-                "could not run under the full mandatory policy) — refusing "
-                "to execute untrusted code"
+                "could not run under the full mandatory policy)"
+                f"{detail} — refusing to execute untrusted code"
             )
 
     def _functional_self_test(self) -> bool:
@@ -270,7 +293,15 @@ class SandboxExecutor:
             else:
                 res = self._execute(["/usr/bin/true"], "", limits, {}, [], [], None)
                 ok = res.exit_code == 0
-        except SandboxError:
+            if not ok:
+                self._self_test_error = (
+                    "the launcher ran but its enforcement report was "
+                    "incomplete (landlock/seccomp/netns not all established)"
+                )
+        except SandboxError as exc:
+            # The launcher's refusal names the mandatory step that failed
+            # (e.g. 'user_namespace'); keep it for ensure_available().
+            self._self_test_error = str(exc)
             ok = False
         self._self_test_ok = ok
         return ok
@@ -422,7 +453,10 @@ class SandboxExecutor:
                     pass
 
             warnings: list[str] = []
-            if not status["uid_dropped"]:
+            if not status["uid_dropped"] and status.get("strategy") != "rootless-userns":
+                # On the rootless strategy there IS no drop to warn about:
+                # the child's identity is namespace-scoped by design and
+                # the report says so via isolation_strategy/uid.
                 warnings.append(
                     "identity drop not applied: "
                     + str(status.get("uid_drop_reason") or "unknown reason")
@@ -446,6 +480,7 @@ class SandboxExecutor:
                     seccomp_filter=bool(status["seccomp"]),
                     uid=int(status["uid"]),
                     uid_dropped=bool(status["uid_dropped"]),
+                    isolation_strategy=status.get("strategy"),
                     filesystem_hardened=bool(status["landlock"]),
                     temp_dir=str(run_dir),
                 ),
@@ -458,6 +493,18 @@ class SandboxExecutor:
                 except OSError:
                     pass
             shutil.rmtree(run_dir, ignore_errors=True)
+
+    def _dropping_privileges(self) -> bool:
+        """True ONLY on the root-setuid strategy with the drop enabled.
+
+        This is the only case where the executor rewrites DAC ownership
+        (chowning run/output dirs to the sandbox uid, fixing traverse /
+        read bits): on the rootless strategy the child runs with the app
+        user's OUTER uid, so those directories must stay owned by the
+        app user — the child writes them directly, and chowning them to
+        ``sandbox_uid`` would break (and is impossible unprivileged).
+        """
+        return os.geteuid() == 0 and self.policy.drop_privileges_when_root
 
     # ------------------------------------------------------------------ #
     def _prepare_argv(
@@ -489,7 +536,7 @@ class SandboxExecutor:
         dest = run_dir / "prog"
         shutil.copyfile(resolved, dest)
         dest.chmod(0o755)
-        if os.geteuid() == 0 and self.policy.drop_privileges_when_root:
+        if self._dropping_privileges():
             os.chown(dest, self.policy.sandbox_uid, self.policy.sandbox_gid)
         return ["./prog", *argv[1:]], None
 
@@ -528,14 +575,16 @@ class SandboxExecutor:
         """Make granted paths usable by the sandbox uid (DAC side).
 
         Landlock is an allowlist *on top of* DAC: both must permit. When
-        the child will run as ``sandbox_uid`` (we are root and will drop),
-        the run directory and compiler output directories are chowned to
-        it, and ancestor directories of granted paths get traverse-only
-        (o+x) permission where the sandbox identity could not otherwise
-        pass. No read/write bits are ever added to ancestors, and nothing
-        is changed when not dropping privileges.
+        the child will run as ``sandbox_uid`` (root-setuid strategy: we
+        are root and will drop), the run directory and compiler output
+        directories are chowned to it, and ancestor directories of
+        granted paths get traverse-only (o+x) permission where the
+        sandbox identity could not otherwise pass. No read/write bits
+        are ever added to ancestors. On the rootless strategy NOTHING is
+        chowned: the run dir stays owned by the app user and the child
+        (whose outer uid IS the app user) writes it directly.
         """
-        if os.geteuid() != 0 or not self.policy.drop_privileges_when_root:
+        if not self._dropping_privileges():
             return
         uid, gid = self.policy.sandbox_uid, self.policy.sandbox_gid
         os.chown(run_dir, uid, gid)
