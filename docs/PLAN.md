@@ -163,9 +163,17 @@ Persistent storage: SQLite (run metadata, index) + artifact dir (immutable files
 21. Setup instructions + example rules + final-report material.
 22. Nothing mocked presented as real.
 
-## 7. Environment notes (this VM)
+## 7. Environment notes (this VM) — updated end of Phase 8
 
 Python 3.12.3 ✓, gcc 13.3 ✓. Missing: Ollama, cppcheck, valgrind, lizard,
 perf → dependent analyzers/tests degrade to `unsupported`/`skipped` with
 explicit diagnostics (never silent). 2 CPU / 7 GB RAM here; target is 16 GB
-(Khushi's machine). Sandbox capability probe is part of P4.
+(Khushi's machine).
+
+Final measured state (2026-10-20): sandbox probe →
+`user_namespaces=False, network_namespace=True, seccomp=True,
+cgroup_v2=False, resource_limits=True, landlock_abi=1, compiler=/usr/bin/gcc`.
+Full suite **203 passed, 4 skipped, 0 failed** (skips: real-Ollama tests
+only). Variance 0.00 (bar ≤ 7.0) with deterministic stand-in; real-LLM
+validation (test-generation quality, true variance) still belongs on the
+target machine with Ollama + llama3.1.
