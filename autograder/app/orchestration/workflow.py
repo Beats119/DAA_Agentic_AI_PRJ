@@ -11,8 +11,8 @@
 
 Run states follow the Phase-2 state machine
 (queued -> validating -> planning -> generating_tests -> executing ->
-analyzing -> scoring -> reporting -> completed | completed_with_warnings |
-failed | incomplete). Partial failure degrades to ``completed_with_warnings``;
+analyzing -> scoring -> feedback -> reporting -> completed |
+completed_with_warnings | failed | incomplete). Partial failure degrades to ``completed_with_warnings``;
 a required metric without evidence becomes ``incomplete`` — never a silent
 ``completed``.
 
@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 import shutil
 import tempfile
+import time
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -79,6 +81,8 @@ from .feedback import (
     finalize_feedback,
 )
 from .planner import ANALYZER_MODULES, EvaluationPlan, build_plan
+
+log = logging.getLogger("autograder.workflow")
 
 
 class WorkflowError(RuntimeError):
@@ -244,6 +248,35 @@ def evaluate(
     artifacts_base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix=f"ag_eval_{run_id}_"))
 
+    # --- terminal step logging -------------------------------------------
+    # One line when a step starts, one when it ends with its elapsed
+    # time, so an operator watching the terminal can see exactly where
+    # an evaluation is spending its time (usually: waiting on the LLM).
+    run_t0 = time.monotonic()
+    _step_name: str | None = None
+    _step_t0 = 0.0
+
+    def _step_done() -> None:
+        nonlocal _step_name
+        if _step_name is not None:
+            log.info("run %s step %s done in %.1fs",
+                     run_id[:8], _step_name, time.monotonic() - _step_t0)
+            _step_name = None
+
+    def _step(name: str) -> None:
+        nonlocal _step_name, _step_t0
+        _step_done()
+        _step_name = name
+        _step_t0 = time.monotonic()
+        log.info("run %s step %s ...", run_id[:8], name)
+
+    def _finished(status: str, detail: str = "") -> None:
+        suffix = f" ({detail})" if detail else ""
+        log.info("run %s finished: %s in %.1fs%s",
+                 run_id[:8], status, time.monotonic() - run_t0, suffix)
+
+    _step("validating")
+
     # --- inputs: read + hash + validate rules (fail fast, before any record)
     assignment_bytes, assignment_hash = _sha256_file(assignment_path)
     source_bytes, source_hash = _sha256_file(source_path)
@@ -364,6 +397,7 @@ def evaluate(
             _go(state)
         except Exception:
             pass
+        _finished(state, reason[:160])
         return RunResult(
             run_id=run_id,
             report=report,
@@ -395,6 +429,7 @@ def evaluate(
 
         # ---------------- planning ----------------
         _go("planning")
+        _step("planning")
         # The plan is necessarily built before spec extraction (spec=None).
         # Its analyzer-availability warnings apply immediately; the
         # spec-degradation warning does NOT — it is surfaced only if the
@@ -451,6 +486,7 @@ def evaluate(
 
         spec = None
         if gateway is not None:
+            _step("specification")
             try:
                 spec, spec_record = extract_specification(doc, gateway)
                 model_records.append(_model_record("specification", spec_record))
@@ -469,6 +505,9 @@ def evaluate(
                     "test generation impossible, correctness will be inconclusive"
                 )
         else:
+            _step("generating_tests")
+            log.info("run %s no LLM gateway: specification extraction and "
+                     "test generation skipped", run_id[:8])
             limitations.append(
                 "no LLM gateway for this run: specification extraction and "
                 "test generation skipped; correctness will be inconclusive"
@@ -484,6 +523,7 @@ def evaluate(
         test_stats = {"generated": 0, "validated": 0, "executed": 0,
                       "rejected": 0, "trusted": 0}
         if spec is not None and gateway is not None:
+            _step("generating_tests")
             suite = generate_test_suite(
                 spec, rules, gateway, budget_tracker=budget_tracker)
             limitations.extend(suite.get("limitations", []))
@@ -504,6 +544,7 @@ def evaluate(
             )
 
             # --- tiered oracle assessment ---
+            _step("oracle_assessment")
             service = OracleService(
                 reference_source=rules.oracle.reference_solution_path
             )
@@ -589,6 +630,7 @@ def evaluate(
 
         # ---------------- executing ----------------
         _go("executing")
+        _step("compiling")
 
         def _compile_fn(src: str, out_dir: str) -> CompileResult:
             return compile_c(src, out_dir, rules.compile, executor,
@@ -615,6 +657,7 @@ def evaluate(
 
         # ---------------- analyzing ----------------
         _go("analyzing")
+        _step("analyzing")
         gateway_spec = _gateway_spec(gateway)
         jobs: list[AnalyzerJob] = []
         for metric in rules.metrics:
@@ -721,6 +764,7 @@ def evaluate(
 
         # ---------------- scoring ----------------
         _go("scoring")
+        _step("scoring")
         finalized_evidence = registry.finalize()
         score_result: ScoreResult = score(
             [results[m.name] for m in rules.metrics if m.name in results],
@@ -748,6 +792,8 @@ def evaluate(
                             if r["passed"])
 
         # ---------------- feedback ----------------
+        _go("feedback")
+        _step("feedback")
         feedback_out = finalize_feedback(
             evidence_json=registry.to_json(),
             gateway=gateway,
@@ -788,6 +834,7 @@ def evaluate(
 
         # ---------------- reporting ----------------
         _go("reporting")
+        _step("reporting")
 
         # The report's uncertainty section must ALWAYS carry our caveats,
         # regardless of what the LLM put in its own uncertainty notes.
@@ -955,6 +1002,10 @@ def evaluate(
         store.set_grade(
             run_id, None if grade_value is None else str(grade_value))
         _go(report_status)
+        _step_done()
+        _finished(report_status,
+                  f"grade {grade_value:.1f}" if grade_value is not None
+                  else "no grade (insufficient trusted evidence)")
 
         return RunResult(
             run_id=run_id,
@@ -980,4 +1031,5 @@ def evaluate(
             raise WorkflowError(
                 f"evaluation failed irrecoverably: {exc}\n{tb}") from exc
     finally:
+        _step_done()
         shutil.rmtree(work, ignore_errors=True)

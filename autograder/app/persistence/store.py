@@ -55,7 +55,8 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "generating_tests": frozenset({"executing", "failed", "incomplete"}),
     "executing": frozenset({"analyzing", "failed", "incomplete"}),
     "analyzing": frozenset({"scoring", "failed", "incomplete"}),
-    "scoring": frozenset({"reporting", "failed", "incomplete"}),
+    "scoring": frozenset({"feedback", "failed", "incomplete"}),
+    "feedback": frozenset({"reporting", "failed", "incomplete"}),
     "reporting": frozenset(
         {"completed", "completed_with_warnings", "failed", "incomplete"}
     ),
