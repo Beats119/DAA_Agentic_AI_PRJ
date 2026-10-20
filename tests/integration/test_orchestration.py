@@ -460,6 +460,14 @@ def test_state_machine_walk(assignment_pdf, rules_path, source_path,
     for before, after in seen:
         assert after in store_mod.TRANSITIONS[before], \
             f"invalid transition {before} -> {after}"
+    # The feedback phase is a named status of its own: a full evaluation
+    # must pass scoring -> feedback -> reporting, so the run page never
+    # sits on "scoring" while the (potentially minutes-long) feedback
+    # draft + verification runs.
+    walked = [after for _before, after in seen]
+    assert "feedback" in walked, f"no feedback status in walk: {walked}"
+    assert walked.index("scoring") < walked.index("feedback")
+    assert walked.index("feedback") < walked.index("reporting")
     assert seen[-1][1] in store_mod.TERMINAL_STATES
     assert seen[-1][1] == result.status
     # No transitions after the terminal state.

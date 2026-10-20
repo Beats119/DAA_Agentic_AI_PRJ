@@ -43,6 +43,7 @@ launcher). If the mandatory bar cannot be met, nothing executes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import select
 import shutil
@@ -60,6 +61,8 @@ from .policy import KNOWN_CAPABILITIES, SandboxPolicy, load_policy
 from .seccomp import PROFILES
 
 SANDBOX_VERSION = "sandbox-2.1"
+
+log = logging.getLogger("autograder.sandbox")
 
 #: Directories whose binaries are invoked in place (with a per-file
 #: Landlock execute rule) instead of being copied into the run directory.
@@ -279,6 +282,7 @@ class SandboxExecutor:
         if self._self_test_ok is not None:
             return self._self_test_ok
         ok = False
+        strategy: str | None = None
         try:
             cat = shutil.which("cat")
             limits = ExecLimits(wall_time_s=15.0, cpu_time_s=15.0)
@@ -293,6 +297,7 @@ class SandboxExecutor:
             else:
                 res = self._execute(["/usr/bin/true"], "", limits, {}, [], [], None)
                 ok = res.exit_code == 0
+            strategy = res.enforcement.isolation_strategy
             if not ok:
                 self._self_test_error = (
                     "the launcher ran but its enforcement report was "
@@ -304,6 +309,11 @@ class SandboxExecutor:
             self._self_test_error = str(exc)
             ok = False
         self._self_test_ok = ok
+        if ok:
+            # Once per executor (the self-test is cached): the terminal
+            # gets one line proving which isolation actually engaged.
+            log.info("sandbox ready: strategy=%s landlock_abi=%s",
+                     strategy, self._caps.landlock_abi)
         return ok
 
     # ------------------------------------------------------------------ #

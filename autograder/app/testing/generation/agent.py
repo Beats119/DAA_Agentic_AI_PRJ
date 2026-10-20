@@ -18,6 +18,8 @@ Pipeline per round:
 
 from __future__ import annotations
 
+import logging
+from collections import Counter
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -40,6 +42,8 @@ from .budgets import (
     BudgetTracker,
     effective_budgets,
 )
+
+log = logging.getLogger("autograder.workflow")
 
 
 class CandidateList(BaseModel):
@@ -210,6 +214,22 @@ def generate_test_suite(
         for rec in recs:
             tracker.add_tokens(int(rec.get("tokens_used", 0) or 0))
 
+    def _log_round(round_no: int, received: int,
+                   accepted_before: int, quarantined_before: int) -> None:
+        new_accepted = len(accepted) - accepted_before
+        new_rejected = quarantined[quarantined_before:]
+        if new_rejected:
+            top = Counter(str(q.get("reason", "unknown"))[:80]
+                          for q in new_rejected)
+            reasons = "; ".join(
+                f"{reason} (x{n})" if n > 1 else reason
+                for reason, n in top.most_common(3))
+        else:
+            reasons = "no rejections"
+        log.info("generation round %d: %d candidates received, %d accepted, "
+                 "%d rejected (%s)",
+                 round_no, received, new_accepted, len(new_rejected), reasons)
+
     def _admit(cands: list[TestCandidate]) -> None:
         for cand in cands:
             if cand.id in seen_ids:
@@ -245,11 +265,13 @@ def generate_test_suite(
             f"({tracker.tokens_used}/{budgets['token_budget']} tokens used)"
         )
     else:
+        accepted_before, quarantined_before = len(accepted), len(quarantined)
         initial, recs = generate_candidates(spec, rules, client)
         records.extend(recs)
         _account_tokens(recs)
         rounds_used += 1
         _admit(initial)
+        _log_round(rounds_used, len(initial), accepted_before, quarantined_before)
         if tracker.tokens_used > budgets["token_budget"]:
             limitations.append(
                 "token budget exhausted "
@@ -286,7 +308,9 @@ def generate_test_suite(
         _account_tokens(recs)
         rounds_used += 1
         before = len(accepted)
+        quarantined_before = len(quarantined)
         _admit(refined)
+        _log_round(rounds_used, len(refined), before, quarantined_before)
         next_num = len(seen_ids) + 1
         if tracker.tokens_used > budgets["token_budget"]:
             limitations.append(

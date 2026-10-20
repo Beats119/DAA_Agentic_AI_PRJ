@@ -14,6 +14,8 @@ adjudicate the candidates it produced.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from ...core.schemas import (
@@ -36,6 +38,8 @@ from .strategies import (
     SpecExampleOracle,
     InstructorExpectedOracle,
 )
+
+log = logging.getLogger("autograder.workflow")
 
 _TIER_ORDER = [INSTRUCTOR, TIER1, TIER2, TIER3]
 
@@ -140,6 +144,7 @@ class OracleService:
         ctx: OracleContext,
     ) -> tuple[list[TestCase], dict[OracleStatus, int], list[dict[str, Any]]]:
         """Assess every case. Returns ``(cases, status_counts, chains)``."""
+        t0 = time.monotonic()
         out: list[TestCase] = []
         chains: list[dict[str, Any]] = []
         counts: dict[OracleStatus, int] = {
@@ -153,4 +158,9 @@ class OracleService:
             out.append(updated)
             chains.append({"test_id": tc.id, "chain": chain})
             counts[updated.status] += 1
+        log.info("oracle assessment: %d cases in %.1fs "
+                 "(trusted=%d, provisional=%d, rejected=%d, inconclusive=%d)",
+                 len(cases), time.monotonic() - t0,
+                 counts["trusted"], counts["provisional"],
+                 counts["rejected"], counts["inconclusive"])
         return out, counts, chains
