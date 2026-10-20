@@ -27,15 +27,18 @@ every run by design, never served from a cache.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
+import platform
 import shutil
 import tempfile
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from autograder import __version__ as APP_VERSION
 
 from ..analyzers.base import AnalyzerContext
 from ..core.schemas import (
@@ -60,6 +63,7 @@ from ..rules.versioning import hash_rules
 from ..sandbox import compiler as sandbox_compiler
 from ..sandbox.compiler import CompileResult, compile_c
 from ..sandbox.executor import (
+    SANDBOX_VERSION,
     ExecLimits,
     SandboxError,
     SandboxExecutor,
@@ -111,16 +115,100 @@ def _sha256_file(path: str | Path) -> tuple[bytes, str]:
 
 
 def _model_record(task: str, info: dict[str, Any]) -> ModelRecord:
-    gen = info.get("generation", {}) or {}
+    """Build a ModelRecord from a generation record dict (D20).
+
+    Two shapes exist in the pipeline: *wrapped* records
+    (``{"generation": {...}, "prompt_version": ...}`` — specification
+    extraction and feedback) and *flat* GenerationRecord dumps (test
+    generation). Both must yield the real model id and prompt version;
+    the old reader only understood the wrapped shape, so test-generation
+    provenance silently degraded to ``"unknown"``.
+    """
+    gen = info.get("generation") or (info if "model" in info else {}) or {}
     return ModelRecord(
         task=task,
-        model=str(gen.get("model", "unknown")),
+        model=str(gen.get("model") or info.get("model") or "unknown"),
         temperature=float(gen.get("temperature", 0.0) or 0.0),
         seed=gen.get("seed"),
         timeout_s=float(gen.get("timeout_s", 0) or 0),
         max_tokens=int(gen.get("max_tokens", 0) or 0),
-        prompt_version=str(info.get("prompt_version", "unknown")),
+        prompt_version=str(
+            info.get("prompt_version")
+            or gen.get("prompt_version")
+            or "unknown"
+        ),
     )
+
+
+def _no_llm_record(task: str) -> ModelRecord:
+    """Honest provenance for a task that ran without any LLM (D20).
+
+    Recorded when no gateway exists for the run: the model is stated as
+    ``none (llm unavailable)`` — never ``"unknown"``, which would imply a
+    model ran but was not recorded.
+    """
+    return ModelRecord(
+        task=task,
+        model="none (llm unavailable)",
+        temperature=0.0,
+        seed=None,
+        timeout_s=0.0,
+        max_tokens=0,
+        prompt_version="none",
+    )
+
+
+def _gateway_spec(gateway: Any | None) -> dict[str, Any] | None:
+    """Name the factory an analyzer worker uses to rebuild the gateway.
+
+    Production gateways are Ollama clients, rebuilt in the worker from
+    the live client's own settings. Any other object is referenced by
+    its class's dotted path (a test seam for test doubles — see
+    ``orchestration.worker``); it must be constructible with no args.
+    """
+    if gateway is None:
+        return None
+    from ..ollama.client import OllamaClient
+
+    if isinstance(gateway, OllamaClient):
+        return {
+            "factory": ("autograder.app.orchestration.worker:"
+                        "make_ollama_gateway"),
+            "kwargs": {
+                "base_url": gateway.base_url,
+                "timeout_s": gateway.timeout_s,
+                "max_retries": gateway.max_retries,
+                "backoff_s": gateway.backoff_s,
+            },
+        }
+    cls = type(gateway)
+    return {"factory": f"{cls.__module__}:{cls.__qualname__}", "kwargs": {}}
+
+
+def _tool_versions(
+    rules: Any,
+    analyzer_results: dict[str, AnalyzerResult] | None = None,
+    compiler_label: str | None = None,
+) -> dict[str, str]:
+    """Tool/version provenance from constants and probed values (D20).
+
+    No hand-written version strings: the app version, sandbox version
+    and scoring policy come from their defining constants, the Python
+    version is the interpreter's own, and the compiler label is the one
+    the sandbox actually ran (falling back to the configured name
+    before compilation has happened).
+    """
+    versions = {
+        "app": APP_VERSION,
+        "sandbox": SANDBOX_VERSION,
+        "scoring_policy": SCORING_POLICY_VERSION,
+        "python": platform.python_version(),
+        "compiler": compiler_label or str(rules.compile.compiler),
+        "c_standard": str(rules.compile.std),
+    }
+    for name, res in (analyzer_results or {}).items():
+        versions[f"analyzer:{name}"] = res.analyzer_version
+    return versions
 
 
 def _sanitize_paths(text: str, work: Path) -> str:
@@ -136,6 +224,8 @@ def evaluate(
     run_id: str | None = None,
     base_dir: str | Path | None = None,
     max_workers: int = 4,
+    evaluation_timeout_s: float = 1800.0,
+    store: RunStore | None = None,
 ) -> RunResult:
     """Run one full evaluation. See the module docstring for the flow."""
     run_id = run_id or uuid.uuid4().hex
@@ -154,7 +244,10 @@ def evaluate(
     rh = hash_rules(rules)
     rules_hash = rh if rh.startswith("sha256:") else "sha256:" + rh
 
-    store = RunStore(artifacts_base)
+    # Share the caller's store when one is supplied (the API passes its
+    # own, so a process never holds two RunStore instances on one DB —
+    # D26); otherwise open one rooted at the artifacts base.
+    store = store if store is not None else RunStore(artifacts_base)
     store.create_run(source_hash, assignment_hash, rules_hash, rules.version,
                      run_id=run_id)
     registry = EvidenceRegistry(run_id, store)
@@ -162,6 +255,12 @@ def evaluate(
     limitations: list[str] = []
     warnings: list[str] = []
     model_records: list[ModelRecord] = []
+    if gateway is None:
+        # Honest provenance (D20): no model ran for the LLM tasks.
+        model_records.extend(
+            _no_llm_record(task)
+            for task in ("specification", "test_generation", "feedback")
+        )
     plan: EvaluationPlan | None = None
 
     def _go(state: str) -> None:
@@ -212,15 +311,40 @@ def evaluate(
             ),
         )
         validate_report(report)
+        # The manifest is written at finalize with the run's TERMINAL
+        # state and finish time (D20) — never a mid-pipeline snapshot.
+        manifest = RunManifest(
+            run_id=run_id,
+            state=state,  # type: ignore[arg-type]
+            finished_at=datetime.now(timezone.utc),
+            submission_hash=source_hash,
+            assignment_hash=assignment_hash,
+            rules_hash=rules_hash,
+            rules_version=rules.version,
+            tool_versions=_tool_versions(rules),
+            model_settings={
+                r.task: {"model": r.model, "temperature": r.temperature,
+                         "seed": r.seed, "prompt_version": r.prompt_version}
+                for r in model_records
+            },
+            prompt_versions={r.task: r.prompt_version
+                             for r in model_records},
+            scoring_policy_version=SCORING_POLICY_VERSION,
+        )
+        # Artifact-write failures are LOGGED (surfaced in the run result),
+        # never silently swallowed (D20).
+        artifact_errors: list[str] = []
         for name, payload in (
             ("report.json", report.model_dump_json(indent=1).encode()),
             ("evidence.json", registry.to_json().encode()),
             ("feedback.json", feedback.model_dump_json(indent=1).encode()),
+            ("manifest.json",
+             manifest.model_dump_json(indent=1).encode()),
         ):
             try:
                 store.write_artifact(run_id, name, payload)
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - logged below
+                artifact_errors.append(f"{name}: {exc}")
         try:
             store.set_grade(run_id, None)
         except Exception:
@@ -236,7 +360,8 @@ def evaluate(
             artifacts_dir=_artifacts_dir(),
             feedback=feedback,
             feedback_info={"used_fallback": True, "attempts": 0,
-                           "violations": (), "generation_records": []},
+                           "violations": (), "generation_records": [],
+                           "artifact_write_errors": artifact_errors},
             plan=plan or build_plan(None, rules),
         )
 
@@ -259,13 +384,19 @@ def evaluate(
 
         # ---------------- planning ----------------
         _go("planning")
+        # The plan is necessarily built before spec extraction (spec=None).
+        # Its analyzer-availability warnings apply immediately; the
+        # spec-degradation warning does NOT — it is surfaced only if the
+        # spec turns out to be genuinely unavailable (D16), and the plan
+        # is refreshed with the real spec after extraction below.
         plan = build_plan(None, rules)
         limitations.extend(plan.warnings)
         registry.append(
             "evaluation_plan", "planner",
             {"steps": [s.name for s in plan.steps],
              "analyzer_ids": list(plan.analyzer_ids),
-             "warnings": list(plan.warnings)},
+             "warnings": list(plan.warnings),
+             "spec_warning_deferred": plan.spec_warning},
             affects_grade=False,
         )
 
@@ -332,6 +463,12 @@ def evaluate(
                 "test generation skipped; correctness will be inconclusive"
             )
 
+        # Refresh the plan with the spec as it actually turned out (D16):
+        # only a genuinely missing spec earns the plan's spec warning.
+        plan = build_plan(spec, rules)
+        if spec is None and plan.spec_warning:
+            limitations.append(plan.spec_warning)
+
         test_cases: list[TestCase] = []
         test_stats = {"generated": 0, "validated": 0, "executed": 0,
                       "rejected": 0, "trusted": 0}
@@ -365,8 +502,13 @@ def evaluate(
                     if isinstance(s, ReferenceSolutionOracle):
                         def _ref_compile(src: str, out_dir: str,
                                          _rules=rules, _ex=executor):
-                            return compile_c(src, out_dir, _rules.compile,
-                                             _ex, allowed_dir=None)
+                            # The traversal guard stays ON: the reference
+                            # source may only be read from its own
+                            # directory (it is instructor-configured).
+                            return compile_c(
+                                src, out_dir, _rules.compile, _ex,
+                                allowed_dir=str(
+                                    Path(src).resolve().parent))
 
                         s.set_executor(
                             executor, _ref_compile,
@@ -378,10 +520,19 @@ def evaluate(
                             ),
                         )
                         s.set_budget_tracker(budget_tracker)
+
+                        def _ref_prepare_compile(
+                                src: str, _cc=_ref_compile):
+                            # prepare()'s expected adapter shape. (With a
+                            # sandbox executor wired, prepare uses its own
+                            # sandbox adapter; this one is truthful if used.)
+                            res = _cc(src, str(work / "oracle_ref"))
+                            return {"ok": bool(res.ok),
+                                    "binary": res.binary_path,
+                                    "diagnostics": res.raw_stderr}
+
                         prep = s.prepare(
-                            compile=lambda src: {
-                                "ok": False, "binary": None,
-                                "diagnostics": "unused"},
+                            compile=_ref_prepare_compile,
                             spec=spec,
                         )
                         prep_record = {k: v for k, v in prep.items()
@@ -453,6 +604,7 @@ def evaluate(
 
         # ---------------- analyzing ----------------
         _go("analyzing")
+        gateway_spec = _gateway_spec(gateway)
         jobs: list[AnalyzerJob] = []
         for metric in rules.metrics:
             if not plan.analyzer_available.get(metric.name, False):
@@ -462,8 +614,6 @@ def evaluate(
                     f"({'required' if metric.required else 'optional'}); "
                     "handled per the uncertainty policy")
                 continue
-            module = importlib.import_module(
-                ANALYZER_MODULES[metric.analyzer])
             actx = AnalyzerContext(
                 source_path=str(work_source),
                 binary_path=binary_path,
@@ -483,18 +633,40 @@ def evaluate(
             jobs.append(AnalyzerJob(
                 metric_name=metric.name,
                 analyzer_id=metric.analyzer,
-                analyze_fn=module.analyze,
+                module_path=ANALYZER_MODULES[metric.analyzer],
                 ctx=actx,
                 timeout_s=float(metric.params.get("timeout_s", 180.0)),
+                gateway_spec=gateway_spec,
             ))
-        results: dict[str, AnalyzerResult] = run_analyzers(
-            jobs, max_workers=max_workers)
+        # Analyzers run in worker subprocesses with hard per-analyzer and
+        # overall deadlines (D5): a hung analyzer is terminated, never
+        # waited on forever.
+        budget_seed = budget_tracker.snapshot()
+        outcomes = run_analyzers(
+            jobs, max_workers=max_workers,
+            evaluation_timeout_s=evaluation_timeout_s)
+        results: dict[str, AnalyzerResult] = {
+            name: outcome.result for name, outcome in outcomes.items()
+        }
+        # Reconcile worker-side budget consumption into the run tracker:
+        # each worker was seeded from the same snapshot, so the sum of
+        # per-worker deltas is the analyzer phase's total consumption.
+        for outcome in outcomes.values():
+            if outcome.budget:
+                budget_tracker.add_tokens(max(
+                    0, int(outcome.budget.get("tokens_used", 0))
+                    - budget_seed["tokens_used"]))
+                budget_tracker.add_execs(max(
+                    0, int(outcome.budget.get("execs_used", 0))
+                    - budget_seed["execs_used"]))
 
         # Remint analyzer evidence through the central registry so ids are
-        # unique per run (each analyzer context numbers from 1).
+        # unique per run (each worker context numbers from 1). Iterating
+        # jobs — rules order, not completion order — keeps evidence
+        # numbering deterministic.
         id_map: dict[str, str] = {}
         for job in jobs:
-            for ev in job.ctx.evidence:
+            for ev in outcomes[job.metric_name].evidence:
                 new_id = registry.append(
                     ev.kind, ev.analyzer, ev.data,
                     severity=ev.severity, confidence=ev.confidence,
@@ -583,6 +755,8 @@ def evaluate(
             run_status=report_status,
         )
         feedback: FeedbackText = feedback_out["feedback"]
+        for rec in feedback_out.get("generation_records", []):
+            model_records.append(_model_record("feedback", rec))
         if feedback_out["used_fallback"]:
             limitations.append(
                 "feedback rendered by the deterministic fallback "
@@ -658,16 +832,12 @@ def evaluate(
             if raw:
                 compiler_diagnostics.append(str(raw)[-2000:])
 
-        tool_versions = {
-            "sandbox": "sandbox-1.0",
-            "scoring_policy": SCORING_POLICY_VERSION,
-            "compiler": f"{rules.compile.compiler} {rules.compile.std}",
-            "python": "3.11+",
-        }
-        for m in rules.metrics:
-            if m.name in results:
-                tool_versions[f"analyzer:{m.name}"] = \
-                    results[m.name].analyzer_version
+        tool_versions = _tool_versions(
+            rules,
+            analyzer_results=results,
+            compiler_label=(compile_result.compiler
+                            if compile_result is not None else None),
+        )
 
         report = Report(
             run_id=run_id,
@@ -724,7 +894,10 @@ def evaluate(
 
         manifest = RunManifest(
             run_id=run_id,
-            state="reporting",  # type: ignore[arg-type]
+            # Written at finalize (below, just before the terminal state
+            # transition) with the run's terminal state + finish time (D20).
+            state=report_status,  # type: ignore[arg-type]
+            finished_at=datetime.now(timezone.utc),
             submission_hash=source_hash,
             assignment_hash=assignment_hash,
             rules_hash=rules_hash,

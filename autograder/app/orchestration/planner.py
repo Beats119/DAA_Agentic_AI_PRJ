@@ -26,17 +26,8 @@ ANALYZER_MODULES: dict[str, str] = {
     "similarity": "autograder.app.analyzers.similarity.analyzer",
 }
 
-# Analyzers that may run concurrently once compilation succeeded.
-# ``correctness`` is excluded: it needs oracle-assessed tests first.
-PARALLEL_ANALYZERS: tuple[str, ...] = (
-    "compiler",
-    "static_analysis",
-    "modularity",
-    "complexity",
-    "memory_safety",
-    "similarity",
-    "readability",
-)
+# ---------------------------------------------------------------------------
+# Plan steps
 
 
 @dataclass(frozen=True)
@@ -54,6 +45,12 @@ class EvaluationPlan:
     analyzer_ids: tuple[str, ...]  # metrics' analyzers, in rules order
     analyzer_available: dict[str, bool] = field(default_factory=dict)
     warnings: tuple[str, ...] = ()
+    # D16: the "no specification available" warning lives OUTSIDE
+    # ``warnings``. The plan is built before spec extraction runs, so a
+    # spec=None plan says nothing about the run's eventual spec — the
+    # workflow surfaces this text only when extraction actually failed or
+    # no gateway exists. Successful LLM runs must never carry it.
+    spec_warning: str | None = None
 
     def step(self, name: str) -> PlanStep:
         for s in self.steps:
@@ -100,9 +97,9 @@ def build_plan(spec: Any, rules: Any) -> EvaluationPlan:
             )
             warnings.append(msg)
 
-    spec_degraded = spec is None
-    if spec_degraded:
-        warnings.append(
+    spec_warning: str | None = None
+    if spec is None:
+        spec_warning = (
             "no specification available: LLM test generation is impossible; "
             "correctness will be inconclusive and the run will carry "
             "completed_with_warnings (or incomplete for required metrics)"
@@ -140,4 +137,5 @@ def build_plan(spec: Any, rules: Any) -> EvaluationPlan:
         analyzer_ids=tuple(analyzer_ids),
         analyzer_available=analyzer_available,
         warnings=tuple(warnings),
+        spec_warning=spec_warning,
     )
