@@ -16,6 +16,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+from ..logging_config import configure_logging
 from ..ollama.client import OllamaClient
 from ..ollama.health import probe as ollama_probe
 from ..persistence.store import RunStore
@@ -108,6 +109,7 @@ def _failed_record(
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     parser = argparse.ArgumentParser(
         prog="autograder-evaluate",
         description="Run one AutoGrader evaluation (Phases 2-6 pipeline).",

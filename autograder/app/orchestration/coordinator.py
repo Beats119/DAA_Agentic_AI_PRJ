@@ -37,6 +37,7 @@ order, so completion order never affects the assembled report.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -49,6 +50,8 @@ from typing import Any
 
 from ..analyzers.base import build_result
 from ..core.schemas import AnalyzerResult, Evidence, MetricConfig
+
+log = logging.getLogger("autograder.workflow")
 
 DEFAULT_ANALYZER_TIMEOUT_S = 180.0
 DEFAULT_EVALUATION_TIMEOUT_S = 1800.0
@@ -150,6 +153,7 @@ def _worker_env() -> dict[str, str]:
 class _Running:
     job: AnalyzerJob
     proc: subprocess.Popen
+    started: float  # monotonic, for duration reporting
     deadline: float  # monotonic
     spec_path: Path
     result_path: Path
@@ -198,6 +202,8 @@ class AnalyzerCoordinator:
                 # Overall deadline: stop starting work; terminate runners.
                 if pending and now >= overall_deadline:
                     for job in pending:
+                        log.info("analyzer %s: skipped (evaluation deadline "
+                                 "exceeded before it started)", job.metric_name)
                         outcomes[job.metric_name] = AnalyzerOutcome(
                             result=_skipped_result(
                                 job,
@@ -267,12 +273,20 @@ class AnalyzerCoordinator:
             overall_deadline,
         )
         return _Running(
-            job=job, proc=proc, deadline=deadline,
+            job=job, proc=proc, started=time.monotonic(), deadline=deadline,
             spec_path=spec_path, result_path=result_path,
             stderr_path=stderr_path,
         )
 
     # ------------------------------------------------------------------ #
+    def _finish(self, entry: _Running, rc: int | None) -> AnalyzerOutcome:
+        """Collect a finished worker's outcome and log one summary line."""
+        outcome = self._collect(entry, rc)
+        log.info("analyzer %s: %s in %.1fs",
+                 entry.job.metric_name, outcome.result.status,
+                 time.monotonic() - entry.started)
+        return outcome
+
     def _poll(
         self, entry: _Running, overall_deadline: float
     ) -> AnalyzerOutcome | None:
@@ -280,12 +294,12 @@ class AnalyzerCoordinator:
         now = time.monotonic()
         rc = entry.proc.poll()
         if rc is not None:
-            return self._collect(entry, rc)
+            return self._finish(entry, rc)
         if entry.kill_at is not None:
             if now >= entry.kill_at:
                 _terminate(entry.proc, force=True)
                 entry.proc.wait()
-                return self._collect(entry, entry.proc.returncode)
+                return self._finish(entry, entry.proc.returncode)
             return None
         if now >= entry.deadline:
             timed_out = entry.deadline < overall_deadline

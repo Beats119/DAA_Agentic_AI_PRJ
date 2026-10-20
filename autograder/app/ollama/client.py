@@ -15,6 +15,7 @@ Hard invariants:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import urllib.parse
@@ -28,6 +29,13 @@ from ..core.schemas import GenerationRecord
 from .prompts import PromptError, load_prompt, prompt_hash
 
 T = TypeVar("T", bound=BaseModel)
+
+log = logging.getLogger("autograder.llm")
+
+
+def _preview(text: str, limit: int = 400) -> str:
+    """One-line, length-capped preview for DEBUG logs (whitespace folded)."""
+    return " ".join(text.split())[:limit]
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _API_GENERATE = "/api/generate"
@@ -163,6 +171,7 @@ class OllamaClient:
         seed: int | None = 42,
         timeout_s: float | None = None,
         num_predict: int | None = None,
+        task: str = "generate",
     ) -> tuple[str, int]:
         """Generate once; return ``(text, tokens_used)``.
 
@@ -171,6 +180,10 @@ class OllamaClient:
         recorded. ``tokens_used`` is Ollama's reported
         ``prompt_eval_count + eval_count`` when the server provides both;
         otherwise the documented estimate ``len//4`` per side.
+
+        Every call is logged (logger ``autograder.llm``): one line when
+        the request is sent and one when the response lands (or fails),
+        with wall time and Ollama's own timing fields when provided.
         """
         payload: dict[str, Any] = {
             "model": model,
@@ -182,11 +195,24 @@ class OllamaClient:
             payload["options"]["seed"] = seed
         if num_predict is not None:
             payload["options"]["num_predict"] = int(num_predict)
-        body = self._post(
-            _API_GENERATE, payload, timeout_s if timeout_s is not None else self.timeout_s
-        )
+        log.info("→ task=%s model=%s prompt=%d chars", task, model, len(prompt))
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("→ task=%s prompt preview: %s", task, _preview(prompt))
+        t0 = time.monotonic()
+        try:
+            body = self._post(
+                _API_GENERATE, payload,
+                timeout_s if timeout_s is not None else self.timeout_s
+            )
+        except OllamaError as exc:
+            log.warning("← task=%s model=%s failed after %.1fs: %s",
+                        task, model, time.monotonic() - t0, exc)
+            raise
+        elapsed = time.monotonic() - t0
         text = body.get("response", "")
         if not isinstance(text, str) or not text:
+            log.warning("← task=%s model=%s failed after %.1fs: "
+                        "empty response from Ollama", task, model, elapsed)
             raise OllamaBadResponse("Ollama returned an empty response")
         eval_count = body.get("eval_count")
         prompt_eval_count = body.get("prompt_eval_count")
@@ -194,6 +220,19 @@ class OllamaClient:
             tokens_used = eval_count + prompt_eval_count
         else:
             tokens_used = len(prompt) // 4 + len(text) // 4
+        extras = ""
+        if isinstance(eval_count, int):
+            extras += f" tokens={eval_count}"
+        eval_duration = body.get("eval_duration")
+        if isinstance(eval_duration, (int, float)):
+            extras += f" gen={eval_duration / 1e9:.1f}s"
+        total_duration = body.get("total_duration")
+        if isinstance(total_duration, (int, float)):
+            extras += f" total={total_duration / 1e9:.1f}s"
+        log.info("← task=%s model=%s %.1fs response=%d chars%s",
+                 task, model, elapsed, len(text), extras)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("← task=%s response preview: %s", task, _preview(text))
         return text, tokens_used
 
     # -- structured --------------------------------------------------------
@@ -249,6 +288,7 @@ class OllamaClient:
                     seed=seed,
                     timeout_s=timeout_s,
                     num_predict=num_predict,
+                    task=task,
                 )
                 tokens_total += usage
             except OllamaBadResponse as exc:

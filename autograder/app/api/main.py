@@ -4,16 +4,28 @@ Usage:
     python -m autograder.app.api.main [--host 127.0.0.1] [--port 8000]
 
 Reads ``.env`` from the current directory when present (KEY=VALUE lines;
-no interpolation). Relevant keys: ``OLLAMA_URL``, ``ARTIFACT_DIR``.
+no interpolation). Relevant keys: ``OLLAMA_URL``, ``ARTIFACT_DIR``,
+``AUTOGRADER_LOG_LEVEL``.
+
+Pipeline progress (workflow steps, LLM calls, analyzer runs) is logged
+to the terminal via stdlib logging; see ``logging_config``. Uvicorn's
+per-request access log is OFF by default — the run page polls every
+couple of seconds and would bury the real logs; pass ``--access-log``
+to re-enable it.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 
 import uvicorn
+
+from ..logging_config import configure_logging
+
+logger = logging.getLogger("autograder.api")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -46,18 +58,24 @@ def _gateway_factory():
 
 def main() -> None:
     _load_dotenv(Path.cwd() / ".env")
+    configure_logging()
     parser = argparse.ArgumentParser(description="AutoGrader web app")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--access-log", action="store_true",
+                        help="enable uvicorn's per-request access log "
+                             "(default off: the run page's polling floods "
+                             "the terminal and buries the pipeline logs)")
     args = parser.parse_args()
 
     from .app import create_app
 
     base_dir = Path(os.environ.get("ARTIFACT_DIR", Path.cwd() / "artifacts"))
     app = create_app(base_dir=base_dir, gateway_factory=_gateway_factory)
-    print(f"AutoGrader on http://{args.host}:{args.port} "
-          f"(data dir: {base_dir})")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    logger.info("AutoGrader on http://%s:%d (data dir: %s)",
+                args.host, args.port, base_dir)
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                access_log=args.access_log)
 
 
 if __name__ == "__main__":

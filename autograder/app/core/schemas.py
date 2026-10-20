@@ -37,6 +37,7 @@ RunStatus = Literal[
     "executing",
     "analyzing",
     "scoring",
+    "feedback",
     "reporting",
     "completed",
     "completed_with_warnings",
