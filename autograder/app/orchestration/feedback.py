@@ -14,7 +14,28 @@ Two halves with a hard boundary between them:
    - the grade is never restated or recomputed;
    - no contradiction with recorded analyzer outcomes (best-effort
      keyword check for the compile case);
+   - every cited source location (``line 42``, ``lines 10-15``,
+     ``file.c:33``, ``:33``) names a line that actually exists in the
+     submission — checked only when the caller supplies the source line
+     count (the workflow always does; direct callers that omit it skip
+     this check, since a line count cannot be guessed honestly);
+   - every metric-score claim names a metric that exists in the run's
+     metric set and states its recorded score (on either the 0-1 or the
+     0-100 scale) — checked only when the caller supplies the per-metric
+     scores;
    - the schema is valid (guaranteed by structured generation).
+
+3. **Supplementary LLM audit** (OPTIONAL, off by default): when enabled
+   via ``finalize_feedback(..., llm_check=True)`` — the workflow resolves
+   it from ``evaluate(feedback_llm_check=...)`` or the
+   ``AUTOGRADER_FEEDBACK_LLM_CHECK`` env var — a draft that PASSED the
+   deterministic verifier is additionally audited by the local model
+   against the evidence registry (``prompts/feedback_check.txt``). Its
+   objections are treated exactly like deterministic violations: they
+   trigger the same bounded regeneration, nothing more. The audit can
+   never edit a draft, the evidence, or the grade, and if the audit
+   itself fails (model down, bad output) the deterministically verified
+   draft stands — the deterministic verifier is authoritative.
 
 Failed drafts are regenerated within a bounded retry budget; if they keep
 failing, a deterministic evidence-based fallback renders the feedback with
@@ -25,8 +46,8 @@ analyzer evidence: it only ever receives read-only copies.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from ..core.schemas import StrictModel
 from ..ollama.models import model_cfg_for
@@ -36,6 +57,86 @@ from ..ollama.prompts import load_prompt
 DEFAULT_FEEDBACK_RETRIES = 2
 
 _EVIDENCE_ID_RE = re.compile(r"ev:[A-Za-z0-9_-]+:\d+")
+
+# --- source-location citations (D21) -------------------------------------
+# Feedback prose cites source locations in a handful of conventional
+# shapes: "line 42", "lines 10-15" / "lines 10 to 15", "add.c:33",
+# "src/main.c:10-12", and the bare ":33". Each pattern captures the line
+# number(s); ranges capture both endpoints.
+_LINE_CITATION_RES = (
+    re.compile(r"(?i)\blines?\s+(\d+)(?:\s*(?:-|\bto\b)\s*(\d+))?"),
+    re.compile(r"(?i)\b[\w.\-/]+\.(?:c|h)\s*:\s*(\d+)(?:\s*-\s*(\d+))?"),
+    # Bare ":33" — the colon must not be preceded by a word char, dot or
+    # another colon, so times ("12:30"), ratios ("1:3") and key:value
+    # pairs ("expected:5") do not match.
+    re.compile(r"(?<![\w:.]):(\d+)\b"),
+)
+
+
+def _cited_line_numbers(text: str | None) -> set[int]:
+    """All line numbers cited in ``text`` (range endpoints included)."""
+    found: set[int] = set()
+    if not text:
+        return found
+    for pat in _LINE_CITATION_RES:
+        for m in pat.finditer(text):
+            for group in m.groups():
+                if group is not None:
+                    found.add(int(group))
+    return found
+
+
+# --- metric-score claims (D21) ---------------------------------------------
+# A scoring claim about a KNOWN metric: the metric name, a score verb,
+# then a number ("correctness scored 0.8", "score for compiler: 50").
+# The number must match the recorded score on the 0-1 scale (tolerance
+# covers 2-dp rounding) or the 0-100 scale (tolerance covers rounding
+# to the nearest point).
+_SCORE_TOL_FRAC = 0.011
+_SCORE_TOL_PCT = 0.6
+
+# Claims naming a metric that might not exist: only unambiguous shapes
+# are flagged — "metric X scored …" (any name explicitly introduced as
+# a metric) and snake_case tokens, which is how this system's metrics
+# are named ("static_analysis scored …", "score for memory_safety …").
+# Ordinary prose ("the program scored 5", "score of the submission") is
+# deliberately NOT treated as a metric claim.
+_UNKNOWN_METRIC_CLAIM_RES = (
+    re.compile(r"(?i)\bmetric\s+['\"]?([a-z][a-z0-9_]*)['\"]?\s+(?:scored|score\b)"),
+    re.compile(r"(?i)\b([a-z][a-z0-9]*_[a-z0-9_]+)\s+(?:scored|scoring)\s+\d"),
+    re.compile(r"(?i)\bscore\s+(?:for|of)\s+(?:the\s+)?['\"]?([a-z][a-z0-9]*_[a-z0-9_]+)['\"]?"),
+)
+
+
+def _metric_score_claims(
+    text: str | None, metric_scores: dict[str, float | None]
+) -> list[tuple[str, float | None]]:
+    """Extract ``(metric_name, claimed_value)`` scoring claims from text.
+
+    ``claimed_value`` is ``None`` when a claim names an unknown metric
+    without a parseable value — the caller reports it as unknown either
+    way. Claims about known metrics carry their stated number.
+    """
+    claims: list[tuple[str, float | None]] = []
+    if not text:
+        return claims
+    lowered = text.lower()
+    for name in sorted(metric_scores):
+        pat = re.compile(
+            r"(?i)\b" + re.escape(name) + r"\b[^.\n]{0,40}?"
+            r"(?:scored|scoring|score)\b[^.\n]{0,12}?(\d+(?:\.\d+)?)"
+            r"|\bscore\s+(?:for|of)\s+(?:the\s+)?" + re.escape(name) +
+            r"\b[^.\n]{0,8}?(\d+(?:\.\d+)?)"
+        )
+        for m in pat.finditer(text):
+            value = m.group(1) if m.group(1) is not None else m.group(2)
+            claims.append((name, float(value)))
+    for pat in _UNKNOWN_METRIC_CLAIM_RES:
+        for m in pat.finditer(lowered):
+            name = m.group(1)
+            if name not in metric_scores:
+                claims.append((name, None))
+    return claims
 
 
 class FeedbackFailure(StrictModel):
@@ -55,6 +156,64 @@ class FeedbackText(StrictModel):
 class VerificationResult:
     ok: bool
     violations: tuple[str, ...] = ()
+
+
+class FeedbackCheckViolation(StrictModel):
+    claim: str
+    reason: str
+
+
+class FeedbackCheckResult(StrictModel):
+    """Output contract of ``prompts/feedback_check.txt``."""
+
+    verdict: Literal["pass", "fail"]
+    violations: list[FeedbackCheckViolation] = []
+
+
+def check_feedback_llm(
+    feedback: FeedbackText,
+    evidence_json: str,
+    gateway: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    """Supplementary LLM grounding audit of a verified feedback draft.
+
+    Runs ONLY after the deterministic verifier has passed, and only when
+    explicitly enabled. Returns ``(violations, info)`` with violations in
+    the same string shape the deterministic verifier produces, so an
+    objection flows into the same bounded-regeneration path. This pass
+    can only object — it never edits the draft, the evidence, or the
+    grade. Raises on gateway/prompt/config failure; the caller treats
+    that as "check unavailable", never as a violation.
+    """
+    fm, body = load_prompt("feedback_check")
+    prompt = body.replace(
+        "{feedback_json}", feedback.model_dump_json(indent=1)
+    ).replace("{evidence_json}", evidence_json)
+    model_cfg = model_cfg_for("feedback_check")
+    result, record = gateway.generate_structured(
+        task="feedback_check",
+        prompt=prompt,
+        schema=FeedbackCheckResult,
+        model_cfg=model_cfg,
+        prompt_name="feedback_check",
+    )
+    info = {
+        "generation": record.model_dump(mode="json"),
+        "prompt_version": fm.get("version", "unknown"),
+        "model": model_cfg.get("model"),
+        "task": "feedback_check",
+    }
+    if result.verdict != "fail":
+        return [], info
+    violations = [
+        f"llm feedback check: claim {v.claim!r} is ungrounded: {v.reason}"
+        for v in result.violations
+    ]
+    if not violations:
+        violations = [
+            "llm feedback check: verdict 'fail' with no itemized violations"
+        ]
+    return violations, info
 
 
 def generate_feedback(
@@ -101,12 +260,24 @@ def verify_feedback(
     trusted_results: dict[str, dict[str, Any]],
     grade: Any | None,
     analyzer_statuses: dict[str, str] | None = None,
+    *,
+    source_lines: int | None = None,
+    metric_scores: dict[str, float | None] | None = None,
 ) -> VerificationResult:
     """Deterministically verify a feedback draft against recorded evidence.
 
     ``trusted_results`` maps test_id -> {passed, input, expected, actual,
     evidence_id}. ``grade`` is a read-only scalar used only for the
     no-restatement check.
+
+    ``source_lines`` (keyword-only, D21): the number of lines in the
+    submission source. When given, every source location cited in the
+    draft must name an existing line; when ``None`` the location check
+    is skipped (noted here because a verifier must not guess the count).
+    ``metric_scores`` (keyword-only, D21): metric name -> recorded score
+    (0-1 fraction, or ``None`` when the metric produced no score). When
+    given, every metric-score claim in the draft must name a metric in
+    this mapping and state its recorded score.
     """
     violations: list[str] = []
 
@@ -179,6 +350,63 @@ def verify_feedback(
                     f"{label} claims a compile failure but the compiler "
                     "analyzer recorded a successful compilation"
                 )
+
+    # Prose fields scanned by checks 5 and 6: the summary, the per-failure
+    # explanations AND suggestions, and the recommendations.
+    prose_fields: list[tuple[str, str | None]] = [
+        ("summary", feedback.summary),
+        *[(f"per_failure[{i}].explanation", f.explanation)
+          for i, f in enumerate(feedback.per_failure)],
+        *[(f"per_failure[{i}].suggestion", f.suggestion)
+          for i, f in enumerate(feedback.per_failure)],
+        *[(f"recommendation[{i}]", r)
+          for i, r in enumerate(feedback.recommendations)],
+    ]
+
+    # 5. Source-location claims (D21): every cited line must exist in the
+    # submission. Skipped when the caller did not supply the line count.
+    if source_lines is not None:
+        for label, text in prose_fields:
+            for n in sorted(_cited_line_numbers(text)):
+                if n < 1 or n > source_lines:
+                    violations.append(
+                        f"{label} cites line {n} but the submission has "
+                        f"{source_lines} lines"
+                    )
+
+    # 6. Metric-score claims (D21): a claimed metric score must name a
+    # metric in the run's metric set and match its recorded score (on
+    # either the 0-1 or the 0-100 scale). Skipped when the caller did
+    # not supply the per-metric scores.
+    if metric_scores is not None:
+        for label, text in prose_fields:
+            for name, claimed in _metric_score_claims(text, metric_scores):
+                if name not in metric_scores:
+                    violations.append(
+                        f"{label} claims a score for unknown metric "
+                        f"{name!r} (not in this run's metric set)"
+                    )
+                elif claimed is None:
+                    violations.append(
+                        f"{label} makes a scoring claim about metric "
+                        f"{name!r} that cannot be verified"
+                    )
+                elif metric_scores[name] is None:
+                    violations.append(
+                        f"{label} claims metric {name!r} scored {claimed:g} "
+                        "but that metric has no recorded score"
+                    )
+                else:
+                    actual = metric_scores[name]  # type: ignore[assignment]
+                    if not (
+                        abs(claimed - actual) <= _SCORE_TOL_FRAC
+                        or abs(claimed - 100.0 * actual) <= _SCORE_TOL_PCT
+                    ):
+                        violations.append(
+                            f"{label} claims metric {name!r} scored "
+                            f"{claimed:g} but the recorded score is "
+                            f"{actual:g} (0-1 scale)"
+                        )
 
     return VerificationResult(ok=not violations, violations=tuple(violations))
 
@@ -265,15 +493,32 @@ def finalize_feedback(
     test_stats: dict[str, int] | None = None,
     run_status: str = "completed",
     max_retries: int = DEFAULT_FEEDBACK_RETRIES,
+    llm_check: bool = False,
+    source_lines: int | None = None,
+    metric_scores: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Generate → verify → bounded retry → deterministic fallback.
 
     Returns ``{"feedback", "attempts", "used_fallback", "violations",
-    "generation_records"}``. The grade and evidence are only ever read.
+    "generation_records", "llm_check"}``. The grade and evidence are only
+    ever read.
+
+    ``llm_check`` (default False) enables the supplementary LLM grounding
+    audit (:func:`check_feedback_llm`) for drafts that pass the
+    deterministic verifier. Its objections trigger the same bounded
+    regeneration; an audit failure never rejects a verified draft.
+
+    ``source_lines`` / ``metric_scores`` are forwarded to
+    :func:`verify_feedback` for the D21 location and metric-score checks.
     """
     generation_records: list[dict[str, Any]] = []
     attempts = 0
     violations: tuple[str, ...] = ()
+    llm_check_info: dict[str, Any] = {
+        "enabled": bool(llm_check),
+        "status": "disabled" if not llm_check else "not_run",
+        "violations": [],
+    }
 
     def _fallback(reason: str) -> dict[str, Any]:
         notes = list(uncertainty_notes or [])
@@ -291,12 +536,12 @@ def finalize_feedback(
             "used_fallback": True,
             "violations": violations,
             "generation_records": generation_records,
+            "llm_check": llm_check_info,
         }
 
     if gateway is None:
         return _fallback("no LLM gateway for this run")
 
-    last_feedback: FeedbackText | None = None
     prompt_note = ""
     for attempt in range(max_retries + 1):
         attempts = attempt + 1
@@ -308,11 +553,34 @@ def finalize_feedback(
             prompt_note = ""
             continue
         generation_records.append(info)
-        last_feedback = feedback
         result = verify_feedback(
-            feedback, registry, trusted_results, grade, analyzer_statuses
+            feedback, registry, trusted_results, grade, analyzer_statuses,
+            source_lines=source_lines, metric_scores=metric_scores,
         )
         violations = result.violations
+        if result.ok and llm_check:
+            # Supplementary LLM audit (opt-in). Objections are violations
+            # like any other and trigger regeneration below; an audit
+            # ERROR accepts the deterministically verified draft — the
+            # deterministic verifier is authoritative.
+            try:
+                llm_violations, check_info = check_feedback_llm(
+                    feedback, evidence_json, gateway
+                )
+            except Exception as exc:  # noqa: BLE001 - audit is supplementary
+                llm_check_info["status"] = "unavailable"
+                llm_check_info["detail"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )[:300]
+            else:
+                generation_records.append(check_info)
+                if llm_violations:
+                    llm_check_info["status"] = "violations"
+                    llm_check_info["violations"] = list(llm_violations)
+                    violations = tuple(llm_violations)
+                    result = VerificationResult(ok=False, violations=violations)
+                else:
+                    llm_check_info["status"] = "passed"
         if result.ok:
             return {
                 "feedback": feedback,
@@ -320,6 +588,7 @@ def finalize_feedback(
                 "used_fallback": False,
                 "violations": (),
                 "generation_records": generation_records,
+                "llm_check": llm_check_info,
             }
         # Bounded retry: tell the model exactly what was rejected.
         prompt_note = (
@@ -347,6 +616,11 @@ def build_trusted_results(
         if ev.analyzer != "correctness" or ev.kind != "test_result":
             continue
         data = ev.data or {}
+        if data.get("outcome") == "infra_error":
+            # D15 defense in depth: an infrastructure failure is not a
+            # student test result, even if legacy evidence carries it
+            # under the test_result kind.
+            continue
         test_id = str(data.get("id") or data.get("test_id") or ev.id)
         rec = {
             "test_id": test_id,
