@@ -37,7 +37,7 @@ class _Item(BaseModel):
 
 def _client(handler) -> OllamaClient:
     """An OllamaClient wired to a MockTransport (test double)."""
-    client = OllamaClient("http://127.0.0.1:11434", max_retries=0)
+    client = OllamaClient("http://127.0.0.1:11434")
     client._transport = httpx.Client(
         transport=httpx.MockTransport(handler), trust_env=False)
     return client

@@ -1,10 +1,11 @@
-"""Instrumentation-only change set: per-attempt HTTP logs, coordinator
+"""Instrumentation guarantees: per-attempt HTTP logs, coordinator
 worker-log discoverability, and per-stage timings in the run manifest.
 
 Guarantees:
-- every HTTP attempt in ``OllamaClient._post`` emits exactly one INFO
-  line on ``autograder.llm`` with its attempt number, path, outcome,
-  and elapsed seconds — and never any prompt/payload content;
+- every HTTP attempt in the streaming Ollama client emits exactly one
+  INFO line on ``autograder.llm`` with its attempt number, applicable
+  maximum, path, outcome, and elapsed seconds — and never any
+  prompt/payload content;
 - every finished analyzer job logs its worker stderr-log path on
   ``autograder.workflow``;
 - ``RunManifest.stage_timings`` is additive: old manifests (without
@@ -39,18 +40,32 @@ class _StubRequest:
 
 
 class _StubResponse:
-    status_code = 200
-    text = ""
+    """Minimal streamed response: one NDJSON chunk, then done."""
 
-    def json(self):
-        return {"response": "ok", "eval_count": 1, "prompt_eval_count": 1}
+    status_code = 200
+
+    def close(self):
+        return None
+
+    def read(self):
+        return b""
+
+    def iter_lines(self):
+        yield json.dumps({
+            "response": "ok", "done": True,
+            "eval_count": 1, "prompt_eval_count": 1,
+        })
 
     def raise_for_status(self):
         return None
 
 
 class _FlakyTransport:
-    """Raises ReadTimeout for the first ``failures`` sends, then answers."""
+    """Raises ConnectError for the first ``failures`` sends, then answers.
+
+    Connect-class failures are the only retried class under the current
+    client policy, so they are what exercises the retry path here.
+    """
 
     def __init__(self, failures: int) -> None:
         self.failures = failures
@@ -59,10 +74,10 @@ class _FlakyTransport:
     def build_request(self, method, url, json=None, timeout=None):
         return _StubRequest()
 
-    def send(self, req):
+    def send(self, req, stream=False):
         self.calls += 1
         if self.calls <= self.failures:
-            raise httpx.ReadTimeout("timed out")
+            raise httpx.ConnectError("connection refused")
         return _StubResponse()
 
 
@@ -78,14 +93,14 @@ def _attempt_lines(caplog) -> list[str]:
 
 
 def test_http_attempts_logged_per_attempt(caplog):
-    client = _client(_FlakyTransport(failures=2))
+    # One connect failure (retried: the only retryable class), then OK.
+    client = _client(_FlakyTransport(failures=1))
     with caplog.at_level(logging.INFO, logger="autograder.llm"):
         assert client.generate("hello", model="llama3.1") == "ok"
     lines = _attempt_lines(caplog)
-    assert len(lines) == 3, lines
-    assert "attempt 1/3" in lines[0] and "ReadTimeout" in lines[0]
-    assert "attempt 2/3" in lines[1] and "ReadTimeout" in lines[1]
-    assert "attempt 3/3" in lines[2] and "ok (HTTP 200)" in lines[2]
+    assert len(lines) == 2, lines
+    assert "attempt 1/2" in lines[0] and "ConnectError" in lines[0]
+    assert "attempt 2/2" in lines[1] and "ok (HTTP 200)" in lines[1]
     assert all("/api/generate" in line for line in lines)
     # Attempt lines carry outcome + timing only — never prompt content.
     assert all("hello" not in line for line in lines)
@@ -97,7 +112,7 @@ def test_http_attempt_logged_once_on_immediate_success(caplog):
         assert client.generate("hello", model="llama3.1") == "ok"
     lines = _attempt_lines(caplog)
     assert len(lines) == 1, lines
-    assert "attempt 1/3" in lines[0] and "ok (HTTP 200)" in lines[0]
+    assert "attempt 1/1" in lines[0] and "ok (HTTP 200)" in lines[0]
 
 
 # --------------------------------------------------------------------- #

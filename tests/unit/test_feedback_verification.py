@@ -17,6 +17,11 @@ Violations feed the existing bounded-regeneration / fallback path in
 from __future__ import annotations
 
 from autograder.app.core.schemas import GenerationRecord
+from autograder.app.ollama.client import (
+    OllamaBadResponse,
+    OllamaModelMissing,
+    OllamaUnreachable,
+)
 from autograder.app.orchestration.evidence import EvidenceRegistry
 from autograder.app.orchestration.feedback import (
     FeedbackFailure,
@@ -220,3 +225,88 @@ def test_plain_prose_is_not_a_metric_claim():
                 "and the score of the submission reflects that.")
     result = _verify(fb, metric_scores=_SCORES)
     assert result.ok, result.violations
+
+
+# --------------------------------------------------------------------- #
+# Transport-dead drafts fail fast (no regeneration against a dead server)
+# --------------------------------------------------------------------- #
+
+class _RaisingGateway:
+    """TEST-ONLY gateway whose every draft raises the scripted error."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    def generate_structured(self, *, task, prompt, schema, model_cfg,
+                            prompt_name=None, **kw):
+        self.calls += 1
+        raise self.exc
+
+
+def _finalize(gateway, **over):
+    registry, _ = _registry()
+    kwargs = dict(
+        evidence_json=registry.to_json(),
+        gateway=gateway,
+        registry=registry,
+        trusted_results=dict(_TRUSTED),
+        grade=None,
+        failing_tests=[],
+        analyzer_notes=[],
+        uncertainty_notes=[],
+        test_stats={"generated": 0, "trusted": 0},
+        run_status="incomplete",
+    )
+    kwargs.update(over)
+    return finalize_feedback(**kwargs)
+
+
+def test_feedback_unreachable_fails_fast_to_fallback():
+    # One draft against a dead server, then the fallback — NOT the full
+    # 3-draft budget (that once burned ~18 minutes per run).
+    gw = _RaisingGateway(OllamaUnreachable(
+        "cannot reach Ollama at http://127.0.0.1:11434 (timed out)"))
+    out = _finalize(gw)
+    assert out["used_fallback"] is True
+    assert out["attempts"] == 1
+    assert gw.calls == 1
+    assert any("OllamaUnreachable" in v for v in out["violations"])
+
+
+def test_feedback_model_missing_fails_fast_to_fallback():
+    gw = _RaisingGateway(OllamaModelMissing(
+        "Ollama has no such model: 'llama3.1'. Run: ollama pull llama3.1"))
+    out = _finalize(gw)
+    assert out["used_fallback"] is True
+    assert out["attempts"] == 1
+    assert gw.calls == 1
+
+
+def test_feedback_bad_response_still_regenerates_all_drafts():
+    # A bad reply is NOT transport death: the model answered, so the
+    # bounded regeneration budget still applies in full.
+    gw = _RaisingGateway(OllamaBadResponse("Ollama returned an empty response"))
+    out = _finalize(gw)
+    assert out["used_fallback"] is True
+    assert out["attempts"] == 3
+    assert gw.calls == 3
+
+
+def test_feedback_unverifiable_drafts_still_use_all_attempts():
+    registry, _ = _registry()
+    out = finalize_feedback(
+        evidence_json=registry.to_json(),
+        gateway=_LineCitingGateway(),
+        registry=registry,
+        trusted_results=dict(_TRUSTED),
+        grade=None,
+        failing_tests=[],
+        analyzer_notes=[],
+        uncertainty_notes=[],
+        test_stats={"generated": 0, "trusted": 0},
+        run_status="incomplete",
+        source_lines=20,
+    )
+    assert out["used_fallback"] is True
+    assert out["attempts"] == 3  # default budget: 1 initial + 2 retries
