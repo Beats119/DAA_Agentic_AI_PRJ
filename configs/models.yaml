@@ -7,6 +7,16 @@
 #
 # Defaults target llama3.1 (fits comfortably in 16 GB RAM alongside the
 # toolchain). Tune per task if a smaller/larger local model proves better.
+#
+# Field semantics (see autograder/app/ollama/client.py):
+#   timeout_s:  IDLE timeout under streaming — the maximum seconds allowed
+#               with no output chunk arriving, NOT a total-duration cap.
+#               A slow-but-progressing generation is never killed for
+#               taking long; only a stalled stream is.
+#   num_ctx:    total context window in tokens, prompt + output combined.
+#               Must exceed the largest prompt plus the output cap, or
+#               Ollama silently truncates the prompt.
+#   max_tokens: output-token cap, forwarded to Ollama as num_predict.
 
 tasks:
   test_generation:
@@ -14,34 +24,40 @@ tasks:
     temperature: 0
     seed: 42
     timeout_s: 180
-    max_tokens: 4096
+    max_tokens: 2048
+    num_ctx: 8192
   test_refinement:
     model: "llama3.1"
     temperature: 0
     seed: 42
     timeout_s: 180
-    max_tokens: 4096
+    max_tokens: 2048
+    num_ctx: 8192
   specification:
     model: "llama3.1"
     temperature: 0
     seed: 42
-    timeout_s: 120
-    max_tokens: 4096
+    timeout_s: 180
+    max_tokens: 2048
+    num_ctx: 8192
   code_review:
     model: "llama3.1"
     temperature: 0
     seed: 42
     timeout_s: 120
-    max_tokens: 2048
+    max_tokens: 1024
+    num_ctx: 8192
   feedback:
     model: "llama3.1"
     temperature: 0
     seed: 42
     timeout_s: 120
-    max_tokens: 2048
+    max_tokens: 1024
+    num_ctx: 8192
   feedback_check:
     model: "llama3.1"
     temperature: 0
     seed: 42
     timeout_s: 120
-    max_tokens: 2048
+    max_tokens: 1024
+    num_ctx: 8192

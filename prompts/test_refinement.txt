@@ -1,19 +1,17 @@
 ---
-version: "1.0"
+version: "1.1"
 task: test_refinement
 model_hint: llama3.1
 temperature: 0
 seed: 42
 timeout_s: 180
-max_tokens: 4096
+max_tokens: 2048
 status: final
 ---
 
-You are an expert test designer refining candidate test cases for a
-university programming course. A previous generation round produced
-candidates that were REJECTED or QUARANTINED. Your job is to propose
-replacements that fix the diagnosed problems — not to resubmit the same
-broken cases.
+You refine candidate test cases for a student's C program. A previous round
+produced candidates that were REJECTED or QUARANTINED; propose replacements
+that fix the diagnosed problems — never resubmit a broken case unchanged.
 
 Specification (JSON):
 """
@@ -31,24 +29,27 @@ Uncovered requirements (no surviving candidate covers them yet):
 """
 
 RULES:
-1. NEVER resubmit a candidate identical (same input bytes) to a rejected one.
+1. Never resubmit a candidate with the same input bytes as a rejected one.
    Address the stated reason: fix the input format, recompute the expected
    output, or drop the case if the requirement is genuinely untestable.
-2. If a case was rejected because its expected output could not be trusted,
+2. For cases rejected because their expected output could not be trusted,
    prefer inputs whose expected output is directly checkable against the
-   specification's examples or stated invariants — say which one in the
-   rationale.
-3. If a case was rejected as ambiguity-dependent, either reformulate it so
-   the expected output does not depend on the ambiguity, or omit it and say
-   why in the rationale of a neighboring case.
-4. Target the uncovered requirements first; each new case must cite the
-   requirement IDs it covers.
-5. Same output contract as initial generation: strict JSON array, up to
-   {max_new} elements, each
-   {"id": "T<n>", "input": "<stdin text>",
-    "input_category": "normal|edge|boundary|tricky|invalid|discriminating",
-    "rationale": "<one sentence>", "requirement_refs": ["R1"],
-    "expected_value": "<exact stdout text>"}.
-   Use fresh IDs continuing the sequence (start at {next_id}).
-6. Keep inputs small (well under a second of runtime). Conservative inputs
+   spec's examples or stated invariants — say which one in the rationale.
+3. For cases rejected as ambiguity-dependent, reformulate so the expected
+   output does not depend on the ambiguity, or omit the case.
+4. Target the uncovered requirements first; cite the requirement IDs each
+   new case covers in requirement_refs.
+5. Keep inputs small (well under a second of runtime); conservative inputs
    beat clever ones when the spec is thin.
+
+Be concise: no commentary outside the JSON — only cases that fix a stated
+rejection or cover an uncovered requirement.
+
+OUTPUT CONTRACT — reply with strict JSON only, one object holding up to
+{max_new} candidates, with fresh IDs starting at {next_id}:
+{"candidates": [{"id": "T<n>", "input": "<stdin text>", "input_category":
+"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<one
+sentence>", "requirement_refs": ["R1"], "expected_value": "<exact stdout>"}]}
+
+Example output:
+{"candidates":[{"id":"T7","input":"5\n","input_category":"boundary","rationale":"Single-element case covering uncovered R3; expected output matches the spec example on page 1.","requirement_refs":["R3"],"expected_value":"5\n"}]}

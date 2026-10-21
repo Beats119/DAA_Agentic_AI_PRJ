@@ -182,7 +182,7 @@ def _gateway_spec(gateway: Any | None) -> dict[str, Any] | None:
             "kwargs": {
                 "base_url": gateway.base_url,
                 "timeout_s": gateway.timeout_s,
-                "max_retries": gateway.max_retries,
+                "connect_retries": gateway.connect_retries,
                 "backoff_s": gateway.backoff_s,
             },
         }
@@ -499,6 +499,25 @@ def evaluate(
 
         spec = None
         if gateway is not None:
+            # Best-effort warm-up: a cold model load (~90s) must not
+            # land inside the specification call's idle window. Only
+            # gateways that offer warmup get it (test doubles without
+            # the method are skipped silently); a warm-up failure is
+            # logged and the run continues — the task calls themselves
+            # surface any real error.
+            warmup = getattr(gateway, "warmup", None)
+            if callable(warmup):
+                try:
+                    from ..ollama.models import model_cfg_for
+
+                    warm_model = str(model_cfg_for("specification")["model"])
+                    warm_s = warmup(warm_model)
+                    log.info("run %s warm-up: model %s ready in %.1fs",
+                             run_id[:8], warm_model, warm_s)
+                except Exception as exc:  # noqa: BLE001 - best-effort only
+                    log.warning(
+                        "run %s warm-up failed: %s — continuing; "
+                        "task calls will surface errors", run_id[:8], exc)
             _step("specification")
             try:
                 spec, spec_record = extract_specification(doc, gateway)

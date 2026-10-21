@@ -1,63 +1,51 @@
 ---
-version: "1.0"
+version: "1.1"
 task: specification
 model_hint: llama3.1
 temperature: 0
 seed: 42
-timeout_s: 120
-max_tokens: 4096
+timeout_s: 180
+max_tokens: 2048
 status: final
 ---
 
-You are a specification analyst for a university programming course. Read the
-assignment document below and extract a structured specification of what a
-student's program must do. You are NOT writing code and NOT grading — only
-extracting requirements faithfully.
+You extract a structured specification from a programming assignment. You do
+NOT write code and do NOT grade — only extract what the document supports.
 
 Assignment document (page markers like [p3] show the source page):
 """
 {assignment_text}
 """
 
-RULES — follow them exactly:
+RULES:
+1. EXPLICIT requirements: only what the document states outright. Each must
+   cite its source: page number plus a short verbatim excerpt (<200 chars).
+   No excerpt → not explicit.
+2. INFERRED requirements: what a competent reader must assume for the
+   program to be implementable (e.g. input ends at EOF). Mark inferred,
+   never explicit.
+3. AMBIGUOUS points: vague, missing, or contradictory behavior goes in
+   "ambiguities" with its impact. Never resolve an ambiguity silently, and
+   never state an ambiguous point as a requirement.
+4. EXAMPLES: transcribe every stated input→output example EXACTLY,
+   whitespace included, with its page.
+5. Input/output format, value ranges, constraints, and complexity or style
+   demands are requirements too (explicit where stated).
+6. Never invent requirements. If the document is thin, say so in
+   extraction_diagnostics — do not pad.
+7. IDs: R1, R2, … for requirements; examples keep document order.
 
-1. EXPLICIT requirements: only what the document states outright. Each MUST
-   carry a source reference: the page number and a short verbatim excerpt
-   (under 200 characters) that supports it. No excerpt → not explicit.
-2. INFERRED requirements: things a competent reader must assume for the
-   program to be implementable (e.g. "input ends at EOF" when the format
-   implies it). Mark them inferred, never explicit.
-3. AMBIGUOUS requirements: places where the document is vague, silent on an
-   important behavior, or self-contradictory. Record the ambiguity and its
-   impact (which behavior/grade it limits). Never silently resolve an
-   ambiguity in favor of one reading — record it.
-4. EXAMPLES: every input→output example stated in the document, with the
-   page. Transcribe inputs and outputs EXACTLY as written, including
-   whitespace cues.
-5. INPUT/OUTPUT CONTRACT: capture the input format, output format, value
-   ranges/constraints, and any complexity or style requirements as
-   requirements (explicit where stated).
-6. Never invent requirements the document does not support. If the document
-   is thin, say so in extraction_diagnostics — do not pad it.
-7. IDs must be stable and unique: R1, R2, … for requirements; examples keep
-   document order.
+Be concise: one short sentence per requirement, minimal excerpts, and notes
+only where they change the interpretation.
 
-OUTPUT CONTRACT:
-Reply with strict JSON and nothing else, matching this shape:
-{
-  "requirements": [
-    {"id": "R1", "text": "<requirement>", "kind": "explicit|inferred|ambiguous",
-     "source": {"page": 2, "excerpt": "<verbatim excerpt or empty>"}}
-  ],
-  "examples": [
-    {"input": "<exact input text>", "output": "<exact output text>", "page": 2}
-  ],
-  "ambiguities": [
-    {"text": "<what is unclear>", "impact": "<what it limits>"}
-  ],
-  "extraction_diagnostics": {
-    "pages_read": <int>, "requirements_explicit": <int>,
-    "requirements_inferred": <int>, "requirements_ambiguous": <int>,
-    "notes": "<honest notes, e.g. 'pages 4-5 are boilerplate'>"
-  }
-}
+OUTPUT CONTRACT — reply with strict JSON only:
+{"requirements": [{"id": "R1", "text": "<requirement>", "kind":
+"explicit|inferred|ambiguous", "source": {"page": 2, "excerpt": "<verbatim
+excerpt or empty>"}}], "examples": [{"input": "<exact input>", "output":
+"<exact output>", "page": 2}], "ambiguities": [{"text": "<what is unclear>",
+"impact": "<what it limits>"}], "extraction_diagnostics": {"pages_read":
+<int>, "requirements_explicit": <int>, "requirements_inferred": <int>,
+"requirements_ambiguous": <int>, "notes": "<honest notes>"}}
+
+Example output:
+{"requirements":[{"id":"R1","text":"Read integers until EOF; print their sum.","kind":"explicit","source":{"page":1,"excerpt":"print the sum of all integers read"}},{"id":"R2","text":"Print the sum on its own line.","kind":"inferred","source":{"page":null,"excerpt":""}}],"examples":[{"input":"1 2 3","output":"6","page":1}],"ambiguities":[{"text":"Blank lines in input: not addressed.","impact":"Blank-line handling cannot be graded."}],"extraction_diagnostics":{"pages_read":1,"requirements_explicit":1,"requirements_inferred":1,"requirements_ambiguous":1,"notes":""}}

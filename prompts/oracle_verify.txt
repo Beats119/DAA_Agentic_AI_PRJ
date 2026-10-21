@@ -1,5 +1,5 @@
 ---
-version: "1.0"
+version: "1.1"
 task: oracle_second_path
 model_hint: llama3.1
 temperature: 0
@@ -9,9 +9,9 @@ max_tokens: 2048
 status: final
 ---
 
-You are an independent verifier. Solve the task below step by step from the
-specification, then state the EXACT expected output. Do NOT copy any proposed
-answer — derive it yourself from the specification.
+You are an independent verifier. Derive the correct output from the
+specification yourself — do NOT copy or assume any proposed answer — then
+state the EXACT expected output.
 
 Specification:
 """
@@ -23,9 +23,8 @@ Test input (program stdin):
 {test_input}
 """
 
-First reason step by step about what the correct output must be, then give
-the exact output.
+Be concise: keep "reasoning" to a few short derivation steps; the exact
+output is what counts, so no restating the specification and no extra prose.
 
-OUTPUT CONTRACT:
-Reply with strict JSON and nothing else:
-{"reasoning": "<your step-by-step derivation>", "expected_output": "<exact stdout>"}
+OUTPUT CONTRACT — reply with strict JSON only:
+{"reasoning": "<brief step-by-step derivation>", "expected_output": "<exact stdout>"}

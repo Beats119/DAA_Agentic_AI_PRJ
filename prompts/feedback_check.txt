@@ -1,11 +1,11 @@
 ---
-version: "1.0"
+version: "1.1"
 task: feedback_check
 model_hint: llama3.1
 temperature: 0
 seed: 42
 timeout_s: 120
-max_tokens: 2048
+max_tokens: 1024
 status: draft
 ---
 
@@ -35,10 +35,12 @@ RULES:
 5. Be strict but literal: quote the offending claim verbatim in each
    violation.
 
-IMPORTANT: this pass is SUPPLEMENTARY. Deterministic checks run first and
-are authoritative; you only catch what they miss.
+Be concise: one entry per violation, the claim quoted verbatim, and a
+one-line reason — no restating of grounded content.
 
-OUTPUT CONTRACT:
-Reply with strict JSON and nothing else:
-{"verdict": "pass|fail",
- "violations": [{"claim": "<verbatim offending claim>", "reason": "<why it is ungrounded>"}]}
+This pass is SUPPLEMENTARY: deterministic checks run first and are
+authoritative; you only catch what they miss.
+
+OUTPUT CONTRACT — reply with strict JSON only:
+{"verdict": "pass|fail", "violations": [{"claim": "<verbatim offending
+claim>", "reason": "<why it is ungrounded>"}]}

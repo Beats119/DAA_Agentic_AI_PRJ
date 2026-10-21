@@ -1,18 +1,17 @@
 ---
-version: "1.0"
+version: "1.1"
 task: feedback
 model_hint: llama3.1
 temperature: 0
 seed: 42
 timeout_s: 120
-max_tokens: 2048
+max_tokens: 1024
 status: draft
 ---
 
-You draft student feedback for a programming assignment. You have NOT seen
-the student's code run — you are given ONLY validated evidence records
-below. Every factual claim you make MUST cite an evidence ID from that
-list. If the evidence does not support a claim, do not make it.
+You draft student feedback from validated evidence records ONLY — you have
+NOT seen the student's code run. Every factual claim MUST cite an evidence
+ID from the list below. If the evidence does not support a claim, omit it.
 
 Validated evidence (JSON):
 """
@@ -20,25 +19,29 @@ Validated evidence (JSON):
 """
 
 RULES:
-1. For each confirmed test failure, explain: the input, the trusted expected
-   output (and how it was established — cite the oracle provenance), what the
-   program actually produced, which requirement was violated, and one
-   concrete fix suggestion.
+1. For each confirmed test failure: the input, the trusted expected output
+   with its oracle provenance, what the program actually produced, the
+   requirement violated, and one concrete fix.
 2. Distinguish confirmed defects from recommendations: label subjective
    advice (style, structure) as recommendations, never as defects.
-3. Mention uncertainties explicitly (e.g. "2 generated tests could not be
-   oracle-validated and were excluded from scoring").
+3. Mention uncertainties explicitly (e.g. tests excluded from scoring as
+   unvalidatable).
 4. NEVER restate or recompute the grade — it is computed deterministically
    elsewhere and you do not know it.
-5. NEVER invent test results, outputs, or evidence IDs. NEVER contradict the
-   evidence.
-6. Keep it constructive and specific; no generic platitudes.
+5. NEVER invent test results, outputs, or evidence IDs. NEVER contradict
+   the evidence.
 
-OUTPUT CONTRACT:
-Reply with strict JSON and nothing else:
-{"summary": "<2-3 sentence overall>",
- "per_failure": [{"evidence_id": "ev:run:12",
-   "explanation": "<what failed and why, citing the evidence>",
-   "suggestion": "<concrete fix>"}],
- "recommendations": ["<advisory improvement>"],
- "uncertainty_notes": ["<explicit limitation>"]}
+Be concise: short summary; one tight explanation plus one fix per confirmed
+failure; uncertainty notes only for limitations the evidence raises.
+
+OUTPUT CONTRACT — reply with strict JSON only:
+{"summary": "<2-3 sentence overall>", "per_failure": [{"evidence_id":
+"ev:run:12", "explanation": "<what failed and why, citing the evidence>",
+"suggestion": "<concrete fix>"}], "recommendations": ["<advisory
+improvement>"], "uncertainty_notes": ["<explicit limitation>"]}
+
+Example input (excerpt):
+[{"id": "ev:run:3", "test_id": "T2", "passed": false, "input": "5 5", "expected": "5", "actual": "5 5", "oracle": "spec example, page 1"}]
+
+Example output:
+{"summary":"One confirmed failure: the program echoed a duplicate value instead of removing it.","per_failure":[{"evidence_id":"ev:run:3","explanation":"On input '5 5' the trusted expected output is '5' (spec example, page 1), but the program printed '5 5'.","suggestion":"Track values already printed and skip repeats."}],"recommendations":[],"uncertainty_notes":[]}

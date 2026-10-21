@@ -50,7 +50,7 @@ def test_generate_success_and_record(mock_ollama):
     assert item.name == "x" and item.score == 0.5
     assert record.task == "t" and record.model == "llama3.1"
     assert record.temperature == 0.0 and record.seed == 42
-    assert record.prompt_version == "1.0"  # from prompts/specification.txt
+    assert record.prompt_version == "1.1"  # from prompts/specification.txt
     assert record.prompt_hash.startswith("sha256:")
     # No Authorization header was sent.
     assert b"authorization" not in server.last_request_body.lower()
@@ -111,16 +111,22 @@ def test_tokens_accumulate_across_validation_retries(mock_ollama):
     assert record.tokens_used == 15 + 27
 
 
-def test_retry_on_500_then_success(mock_ollama):
+def test_500_is_not_retried(mock_ollama):
+    """A 5xx means the request reached the server; repeating an
+    expensive generation cannot fix it, so exactly ONE request is made
+    and the error surfaces immediately (connect-class failures are the
+    only retried class — see the client policy)."""
     url, server = mock_ollama
     server.script["generate"] = [
         ("status", 500),
         ("json", {"response": '{"name": "x", "score": 0.5}'}),
     ]
-    client = OllamaClient(url, max_retries=2, backoff_s=0.01)
-    text = client.generate("hi", model="llama3.1")
-    assert json.loads(text) == {"name": "x", "score": 0.5}
+    client = OllamaClient(url, backoff_s=0.01)
+    with pytest.raises(OllamaError, match="HTTP 500"):
+        client.generate("hi", model="llama3.1")
     client.close()
+    # The scripted success was never consumed: only one request happened.
+    assert len(server.script["generate"]) == 1
 
 
 def test_malformed_then_validation_retry_success(mock_ollama):
@@ -180,7 +186,7 @@ def test_unreachable_is_explicit(mock_ollama):
     url, server = mock_ollama
     server.shutdown()  # stop the serve loop...
     server.server_close()  # ...and close the listening socket: the port is now truly dead
-    client = OllamaClient(url, max_retries=0)
+    client = OllamaClient(url, connect_retries=0)
     with pytest.raises(OllamaUnreachable, match="ollama serve"):
         client.generate("hi", model="llama3.1")
     client.close()
@@ -199,7 +205,7 @@ def test_probe_reports_models(mock_ollama):
 def test_timeout_is_explicit(mock_ollama):
     url, server = mock_ollama
     server.script["generate"] = [("hang",)]
-    client = OllamaClient(url, timeout_s=1.0, max_retries=0, backoff_s=0.01)
+    client = OllamaClient(url, timeout_s=1.0, backoff_s=0.01)
     with pytest.raises(OllamaUnreachable):
         client.generate("hi", model="llama3.1", timeout_s=1.0)
     client.close()

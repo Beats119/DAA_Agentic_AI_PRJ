@@ -1,56 +1,50 @@
 ---
-version: "1.0"
+version: "1.1"
 task: test_generation
 model_hint: llama3.1
 temperature: 0
 seed: 42
 timeout_s: 180
-max_tokens: 4096
+max_tokens: 2048
 status: final
 ---
 
-You are an expert test designer for a university programming course. Given the
-extracted assignment specification below, design candidate test cases for a
-student's C program. You are proposing CANDIDATES — a separate oracle
-subsystem will independently validate every expected output before any of it
-counts toward a grade. Never present a guessed expected output as
-established fact.
+You design candidate test cases for a student's C program from the extracted
+assignment specification below. You propose CANDIDATES only — a separate
+oracle validates every expected output before any of it counts toward a
+grade, so never present a guessed expected output as established fact.
 
 Specification (JSON):
 """
 {specification_json}
 """
 
-DESIGN GUIDANCE — use these categories as reasoning prompts, not as a quota:
-- normal: typical valid inputs a correct program handles routinely.
-- edge: empty/minimal input where valid, zero, negative values where allowed,
-  single-element inputs, duplicate values where relevant.
-- boundary: minimum and maximum valid values, off-by-one sizes, limits from
-  the constraints (e.g. INT32_MIN/MAX, n=1, n=max_n).
-- tricky: extra whitespace, tabs, blank lines, unusual but valid formatting,
-  large inputs within stated constraints.
-- invalid: ONLY if the specification defines expected handling for invalid
-  input (e.g. "print ERROR"); otherwise do not invent invalid-input behavior.
-- discriminating: cases that distinguish a plausible WRONG algorithm from the
-  correct one (e.g. an input where bubble sort passes but the required
-  algorithm's edge behavior differs).
+Cover a useful spread — categories are reasoning prompts, not a quota:
+normal (typical valid inputs), edge (empty/minimal, zero, single element,
+duplicates), boundary (min/max values, off-by-one sizes, stated limits),
+tricky (extra whitespace, tabs, blank lines, large-but-valid inputs),
+invalid (ONLY where the spec defines invalid-input handling), discriminating
+(cases where a plausible wrong algorithm fails but the correct one passes).
 
 RULES:
-1. Every input must respect the specification's input contract. If the spec
-   is silent on some format detail, keep inputs conservative and note the
-   assumption in the rationale.
-2. expected_value is YOUR best computation of the exact stdout — but it is a
-   candidate. Be careful: arithmetic must be right; formatting (spaces,
-   newlines) must match the spec's output format exactly.
-3. Each case cites the requirement IDs it covers (requirement_refs).
-4. rationale: one sentence on what the case probes and why it matters.
-5. IDs unique and stable: T1, T2, …
-6. Keep each input small enough to run in well under a second.
-7. Do NOT include provenance or trust claims — those are the oracle's job.
+1. Every input respects the spec's input contract. Where the spec is silent
+   on a format detail, stay conservative and note the assumption in the
+   rationale.
+2. expected_value is your best computation of the exact stdout — arithmetic
+   and formatting (spaces, newlines) must match the spec exactly.
+3. Cite the requirement IDs each case covers in requirement_refs.
+4. rationale: one sentence — what the case probes and why it matters.
+5. Unique IDs: T1, T2, … Keep inputs small (well under a second of runtime).
+6. No provenance or trust claims — that is the oracle's job.
 
-OUTPUT CONTRACT:
-Reply with a strict JSON array and nothing else, {min_cases} to {max_cases}
-elements, each exactly:
-{"id": "T1", "input": "<stdin text>", "input_category": "normal|edge|boundary|tricky|invalid|discriminating",
- "rationale": "<one sentence>", "requirement_refs": ["R1", "R3"],
- "expected_value": "<exact stdout text>"}
+Be concise: no commentary outside the JSON, no duplicate or near-duplicate
+cases, and no filler cases just to reach the count.
+
+OUTPUT CONTRACT — reply with strict JSON only, one object holding
+{min_cases} to {max_cases} candidates:
+{"candidates": [{"id": "T1", "input": "<stdin text>", "input_category":
+"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<one
+sentence>", "requirement_refs": ["R1"], "expected_value": "<exact stdout>"}]}
+
+Example output:
+{"candidates":[{"id":"T1","input":"1 2 3\n","input_category":"normal","rationale":"Covers R1 with a minimal multi-value input.","requirement_refs":["R1"],"expected_value":"6\n"},{"id":"T2","input":"","input_category":"edge","rationale":"Empty input: under R1 the sum is 0.","requirement_refs":["R1"],"expected_value":"0\n"}]}
