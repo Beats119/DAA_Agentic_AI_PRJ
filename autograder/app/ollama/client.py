@@ -174,8 +174,12 @@ class OllamaClient:
 
     def _post_stream(
         self, path: str, payload: dict[str, Any], idle_timeout_s: float
-    ) -> tuple[dict[str, Any], float]:
-        """One logical streaming POST. Returns ``(body, ttft_s)``.
+    ) -> tuple[dict[str, Any], float, int]:
+        """One logical streaming POST. Returns ``(body, ttft_s, attempts)``.
+
+        ``attempts`` is the number of HTTP attempts the call consumed
+        (1 + any connect-class retries) — recorded on the generation
+        record so the manifest shows the true cost of a logical call.
 
         The httpx read timeout is ``idle_timeout_s`` — the maximum gap
         between chunks — while the connect timeout is
@@ -237,7 +241,7 @@ class OllamaClient:
                 log.info("http attempt %d/%d POST %s -> ok (HTTP %d) in %.1fs",
                          n, max(denom, n), path, status,
                          time.monotonic() - t0)
-                return body, ttft
+                return body, ttft, n
             except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                 # The ONLY retryable class: no request reached the
                 # server, so no inference is duplicated by retrying.
@@ -329,7 +333,7 @@ class OllamaClient:
         keep_alive: str = _DEFAULT_KEEP_ALIVE,
     ) -> str:
         """Raw text generation. Prefer :meth:`generate_structured`."""
-        text, _usage = self._generate_full(
+        text, _usage, _stats = self._generate_full(
             prompt,
             model=model,
             temperature=temperature,
@@ -352,8 +356,15 @@ class OllamaClient:
         num_ctx: int = _DEFAULT_NUM_CTX,
         keep_alive: str = _DEFAULT_KEEP_ALIVE,
         task: str = "generate",
-    ) -> tuple[str, int]:
-        """Generate once; return ``(text, tokens_used)``.
+    ) -> tuple[str, int, dict[str, Any]]:
+        """Generate once; return ``(text, tokens_used, stats)``.
+
+        ``stats`` carries the per-call telemetry for the generation
+        record: ``prompt_tokens``/``output_tokens`` (server-reported
+        counts, else None), the server durations converted to seconds
+        (``load_duration_s`` etc., else None), the client-measured
+        ``ttft_s``, ``tokens_per_second`` when computable, and the
+        ``http_attempts`` the call consumed.
 
         The request is STREAMED: ``timeout_s`` is an idle timeout (the
         maximum gap between chunks), never a total-duration cap.
@@ -385,7 +396,7 @@ class OllamaClient:
             log.debug("→ task=%s prompt preview: %s", task, _preview(prompt))
         t0 = time.monotonic()
         try:
-            body, ttft = self._post_stream(
+            body, ttft, http_attempts = self._post_stream(
                 _API_GENERATE, payload,
                 timeout_s if timeout_s is not None else self.timeout_s
             )
@@ -405,6 +416,27 @@ class OllamaClient:
             tokens_used = eval_count + prompt_eval_count
         else:
             tokens_used = len(prompt) // 4 + len(text) // 4
+
+        def _secs(key: str) -> float | None:
+            value = body.get(key)
+            return value / 1e9 if isinstance(value, (int, float)) else None
+
+        eval_duration_s = _secs("eval_duration")
+        tokens_per_second: float | None = None
+        if isinstance(eval_count, int) and eval_duration_s:
+            tokens_per_second = eval_count / eval_duration_s
+        stats: dict[str, Any] = {
+            "prompt_tokens": (prompt_eval_count
+                              if isinstance(prompt_eval_count, int) else None),
+            "output_tokens": eval_count if isinstance(eval_count, int) else None,
+            "load_duration_s": _secs("load_duration"),
+            "prompt_eval_duration_s": _secs("prompt_eval_duration"),
+            "eval_duration_s": eval_duration_s,
+            "total_duration_s": _secs("total_duration"),
+            "ttft_s": ttft,
+            "tokens_per_second": tokens_per_second,
+            "http_attempts": http_attempts,
+        }
         extras = f" ttft={ttft:.1f}s"
         if isinstance(eval_count, int):
             extras += f" tokens={eval_count}"
@@ -418,7 +450,7 @@ class OllamaClient:
                  task, model, elapsed, len(text), extras)
         if log.isEnabledFor(logging.DEBUG):
             log.debug("← task=%s response preview: %s", task, _preview(text))
-        return text, tokens_used
+        return text, tokens_used, stats
 
     # -- structured --------------------------------------------------------
     def generate_structured(
@@ -466,9 +498,11 @@ class OllamaClient:
         last_err: Exception | None = None
         current = prompt
         tokens_total = 0
+        http_attempts_total = 0
+        last_stats: dict[str, Any] = {}
         for attempt in range(validation_retries + 1):
             try:
-                raw, usage = self._generate_full(
+                raw, usage, stats = self._generate_full(
                     current,
                     model=model,
                     temperature=temperature,
@@ -479,6 +513,8 @@ class OllamaClient:
                     task=task,
                 )
                 tokens_total += usage
+                http_attempts_total += int(stats.get("http_attempts", 1))
+                last_stats = stats
             except OllamaBadResponse as exc:
                 # The model replied, but with unusable content (e.g. non-JSON).
                 # Treat as a failed generation attempt, not a transport error.
@@ -497,6 +533,21 @@ class OllamaClient:
                         started_at=started,
                         duration_s=time.monotonic() - t0,
                         tokens_used=tokens_total,
+                        # Telemetry describes the successful call;
+                        # ``attempts`` counts every HTTP attempt the
+                        # logical call consumed, validation re-asks
+                        # included.
+                        prompt_tokens=last_stats.get("prompt_tokens"),
+                        output_tokens=last_stats.get("output_tokens"),
+                        load_duration_s=last_stats.get("load_duration_s"),
+                        prompt_eval_duration_s=last_stats.get(
+                            "prompt_eval_duration_s"),
+                        eval_duration_s=last_stats.get("eval_duration_s"),
+                        total_duration_s=last_stats.get("total_duration_s"),
+                        ttft_s=last_stats.get("ttft_s"),
+                        tokens_per_second=last_stats.get("tokens_per_second"),
+                        validation_passed=True,
+                        attempts=max(1, http_attempts_total),
                     )
                     return instance, record
                 except (ValueError, ValidationError) as exc:

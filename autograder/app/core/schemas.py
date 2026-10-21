@@ -100,6 +100,15 @@ class OraclePolicy(StrictModel):
     tier_preference: list[Literal["tier1_reference", "tier2_independent", "tier3_llm"]] = Field(
         default_factory=lambda: ["tier1_reference", "tier2_independent", "tier3_llm"]
     )
+    # Tier-3 (LLM second-path) verification is OPTIONAL and OFF by default:
+    # it costs one LLM call per otherwise-inconclusive candidate, and its
+    # strongest possible outcome is "provisional" — it can never make a
+    # test trusted or affect confirmed correctness scoring. An instructor
+    # opts in explicitly with ``tier3_llm_verification: true`` in the
+    # rules file. Rules files written before this field existed load with
+    # Tier-3 OFF. When off, the oracle records a skipped-by-policy entry
+    # in each affected candidate's verdict chain — never a fake verdict.
+    tier3_llm_verification: bool = False
     reference_solution_path: str | None = None
     expected_outputs_path: str | None = None
     quarantine_after_rounds: int = Field(ge=1, default=3)
@@ -313,6 +322,31 @@ class GenerationRecord(StrictModel):
     # eval_count + prompt_eval_count when present, otherwise the gateway's
     # documented estimate. Consumed by the generation budget tracker (D10).
     tokens_used: int = Field(default=0, ge=0)
+    # --- per-call inference telemetry (additive; all optional) ----------
+    # Populated by the Ollama client from the streamed response's final
+    # chunk statistics. ``None`` means "not reported / not applicable"
+    # (e.g. test doubles, or a server that omits the field) — never a
+    # fabricated zero. Records persisted before these fields existed
+    # still validate.
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    load_duration_s: float | None = Field(default=None, ge=0)
+    prompt_eval_duration_s: float | None = Field(default=None, ge=0)
+    eval_duration_s: float | None = Field(default=None, ge=0)
+    total_duration_s: float | None = Field(default=None, ge=0)
+    # Client-measured seconds from request start to the first chunk.
+    ttft_s: float | None = Field(default=None, ge=0)
+    # eval_count / eval_duration when the server reported both.
+    tokens_per_second: float | None = Field(default=None, ge=0)
+    # For structured calls: True when the returned instance passed schema
+    # validation (a record is only produced on success, so a persisted
+    # record always carries True or None). None for raw generations and
+    # for records built by test doubles.
+    validation_passed: bool | None = None
+    # Total HTTP attempts this logical call consumed (connect retries +
+    # validation re-asks included). Defaults to 1 for records that do
+    # not track it.
+    attempts: int = Field(default=1, ge=1)
 
 
 class TestCase(StrictModel):
@@ -507,6 +541,44 @@ class StageTiming(StrictModel):
     duration_s: float
 
 
+class StageDiagnostics(StrictModel):
+    """LLM-call aggregates for one workflow stage (counts/timings only).
+
+    Token fields sum whatever the stage's generation records report;
+    a record without token detail contributes to ``llm_calls`` only.
+    """
+
+    llm_calls: int = Field(default=0, ge=0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    tokens_used: int = Field(default=0, ge=0)
+    wall_s: float = Field(default=0.0, ge=0)
+
+
+class RunDiagnostics(StrictModel):
+    """Per-run diagnostic aggregates for the manifest (no content, ever).
+
+    Counts and timings only — no submission text, prompts, or model
+    output. ``stages`` is keyed by workflow stage name. Oracle outcome
+    counts mirror the final per-candidate statuses; the two ``tier3_*``
+    counters record how often Tier-3 verification did NOT run (policy
+    opt-out vs budget exhaustion), so a skipped verification is visible
+    as skipped — never implied to have happened.
+    """
+
+    stages: dict[str, StageDiagnostics] = Field(default_factory=dict)
+    oracle_trusted: int = Field(default=0, ge=0)
+    oracle_provisional: int = Field(default=0, ge=0)
+    oracle_rejected: int = Field(default=0, ge=0)
+    oracle_inconclusive: int = Field(default=0, ge=0)
+    tier3_skipped_by_policy: int = Field(default=0, ge=0)
+    tier3_budget_exhausted: int = Field(default=0, ge=0)
+    generation_rounds: int = Field(default=0, ge=0)
+    # Sandbox executions charged to the run's shared execution budget
+    # (reference-solution runs, correctness test runs, analyzer runs).
+    sandbox_executions: int = Field(default=0, ge=0)
+
+
 class RunManifest(StrictModel):
     run_id: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=_utcnow)
@@ -528,3 +600,5 @@ class RunManifest(StrictModel):
     # Per-stage wall-clock timings (additive instrumentation). Defaulted
     # so manifests persisted before this field existed still validate.
     stage_timings: list[StageTiming] = []
+    # Per-run diagnostic aggregates (additive; counts/timings only).
+    diagnostics: RunDiagnostics = Field(default_factory=RunDiagnostics)
