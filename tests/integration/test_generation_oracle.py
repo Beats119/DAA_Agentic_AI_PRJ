@@ -122,7 +122,9 @@ def test_oracle_tier3_agreement_never_trusted(mock_ollama):
             {"reasoning": "2+3=5", "expected_output": "5\n"})})
     ]
     spec = Specification(requirements=[], examples=[])  # no spec anchors
-    rules = _rules()
+    # Tier-3 is opt-in (default off); this test exercises the tier
+    # itself, so the instructor opts in explicitly.
+    rules = _rules(oracle={"tier3_llm_verification": True})
     svc = OracleService()
     client = OllamaClient(url)
     try:
@@ -145,7 +147,9 @@ def test_oracle_tier3_disagreement_inconclusive(mock_ollama):
             {"reasoning": "hmm", "expected_output": "42\n"})})
     ]
     spec = Specification(requirements=[], examples=[])
-    rules = _rules()
+    # Opt in: without it the chain is inconclusive via the policy skip,
+    # which would make this disagreement assertion vacuous.
+    rules = _rules(oracle={"tier3_llm_verification": True})
     svc = OracleService()
     client = OllamaClient(url)
     try:

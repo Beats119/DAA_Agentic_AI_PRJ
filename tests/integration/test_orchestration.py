@@ -485,3 +485,61 @@ def test_invalid_rules_fail_fast(assignment_pdf, source_path, tmp_path):
         evaluate(str(assignment_pdf), str(source_path), str(bad),
                  gateway=None, base_dir=str(tmp_path / "artifacts"),
                  run_id="should_not_exist")
+
+
+# --------------------------------------------------------------------------- #
+# Latency remediation: Tier-3 opt-in + manifest diagnostics (Findings 1-3)
+# --------------------------------------------------------------------------- #
+
+def _manifest(result) -> dict:
+    return json.loads((Path(result.artifacts_dir) / "manifest.json").read_text())
+
+
+def test_workflow_tier3_off_by_default_and_diagnostics_recorded(
+        assignment_pdf, rules_path, source_path, tmp_path):
+    """Default rules: zero Tier-3 calls; skips + stage diagnostics in manifest."""
+    gateway = FakeGateway()
+    result = _run(assignment_pdf, rules_path, source_path, tmp_path,
+                  gateway=gateway, run_id="diag_t3_off")
+    assert "oracle_second_path" not in gateway.calls
+
+    manifest = _manifest(result)
+    diag = manifest["diagnostics"]
+    # t2/t3 fall through tiers 1-2 (only t1 matches the spec example),
+    # so both reach the Tier-3 decision point and are skipped by policy.
+    assert diag["tier3_skipped_by_policy"] == 2
+    assert diag["tier3_budget_exhausted"] == 0
+    assert diag["oracle_trusted"] == result.report.test_stats.trusted >= 1
+    assert diag["generation_rounds"] >= 1
+    stages = diag["stages"]
+    assert stages["specification"]["llm_calls"] == 1
+    assert stages["generating_tests"]["llm_calls"] >= 1
+    assert stages["feedback"]["llm_calls"] >= 1
+    # The oracle stage made NO LLM calls and the manifest says so.
+    assert stages.get("oracle_assessment", {}).get("llm_calls", 0) == 0
+
+
+def test_workflow_tier3_opt_in_calls_and_records_in_manifest(
+        assignment_pdf, rules_path, source_path, tmp_path):
+    """Opt-in rules: Tier-3 runs, and its records reach the manifest."""
+    data = json.loads(Path(rules_path).read_text())
+    oracle = dict(data.get("oracle") or {})
+    oracle["tier3_llm_verification"] = True
+    data["oracle"] = oracle
+    opt_in_rules = tmp_path / "rules_t3.json"
+    opt_in_rules.write_text(json.dumps(data))
+
+    gateway = FakeGateway()
+    result = _run(assignment_pdf, opt_in_rules, source_path, tmp_path,
+                  gateway=gateway, run_id="diag_t3_on")
+    assert "oracle_second_path" in gateway.calls
+
+    manifest = _manifest(result)
+    diag = manifest["diagnostics"]
+    assert diag["tier3_skipped_by_policy"] == 0
+    assert diag["stages"]["oracle_assessment"]["llm_calls"] >= 1
+    # The records themselves are in the manifest's model settings —
+    # oracle inference no longer vanishes from run provenance.
+    assert "oracle_second_path" in manifest["model_settings"]
+    # Tier-3 can still never create trust beyond the spec example.
+    assert diag["oracle_trusted"] == 1

@@ -1,5 +1,23 @@
 # Task -> model mapping for the Ollama gateway.
 #
+# BUDGET SCOPE (explicit — there is deliberately NO single global LLM
+# budget; each path is bounded as stated, and the run manifest's
+# diagnostics report actual per-stage usage):
+#   - specification:        per-call caps only (timeout_s/max_tokens here).
+#   - test_generation,
+#     test_refinement,
+#     oracle tier-3:        ONE shared per-run token budget — the rules
+#                           file's test_generation.token_budget, enforced
+#                           by a BudgetTracker checked BEFORE each round
+#                           and each tier-3 call (tier-3 is opt-in via
+#                           rules oracle.tier3_llm_verification).
+#   - LLM analyzers
+#     (code_review):        per-call caps only (this file).
+#   - feedback:             bounded drafts (3) x per-call caps;
+#                           feedback_check is opt-in, per-call caps.
+#   Client validation re-asks are bounded at 2 per logical call
+#   (ollama/client.py generate_structured).
+#
 # Startup probes Ollama for actual availability: a configured model that is
 # not installed produces an actionable warning ("run: ollama pull <model>")
 # and the dependent capability degrades explicitly. Models are never

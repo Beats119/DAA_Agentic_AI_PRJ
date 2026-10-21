@@ -662,6 +662,14 @@ class LLMProposedOracle(OracleStrategy):
     tier = TIER3
     prompt_version = "1.0"
 
+    def __init__(self) -> None:
+        # Generation records of every second-path call this instance
+        # makes, in call order. Drained by OracleService into
+        # ``OracleService.records`` so the workflow can account for the
+        # tokens and include the records in the run manifest (they used
+        # to be discarded, which hid Tier-3's true cost).
+        self.records: list[Any] = []
+
     def assess(
         self, test_case: TestCase, spec: Specification, ctx: OracleContext
     ) -> OracleVerdict:
@@ -688,6 +696,20 @@ class LLMProposedOracle(OracleStrategy):
                 status="inconclusive",
                 provenance=_base("no LLM gateway available for second path"),
             )
+        # Budget gate (D10): Tier-3 shares the run's token budget with
+        # test generation. Check BEFORE spending: an exhausted budget
+        # skips the call with an explicit, honest reason — the work is
+        # recorded as not done, never implied.
+        tracker = getattr(ctx, "budget_tracker", None)
+        if tracker is not None and tracker.tokens_exhausted():
+            return OracleVerdict(
+                status="inconclusive",
+                provenance=_base(
+                    "budget_exhausted: run token budget exhausted "
+                    f"({tracker.tokens_used}/{tracker.token_budget} tokens "
+                    "used); tier-3 verification skipped"
+                ),
+            )
         from ...ollama.models import model_cfg_for
         from ...ollama.prompts import load_prompt
 
@@ -701,7 +723,7 @@ class LLMProposedOracle(OracleStrategy):
             prompt = body.replace(
                 "{specification_text}", _spec_text(spec)
             ).replace("{test_input}", test_case.input)
-            answer, _record = ctx.gateway.generate_structured(
+            answer, record = ctx.gateway.generate_structured(
                 task="oracle_second_path",
                 prompt=prompt,
                 schema=SecondPathAnswer,
@@ -713,6 +735,11 @@ class LLMProposedOracle(OracleStrategy):
                 status="inconclusive",
                 provenance=_base(f"second reasoning path failed: {exc}"),
             )
+        # Account for the call: keep the record for the manifest and
+        # charge its tokens to the shared run budget.
+        self.records.append(record)
+        if tracker is not None:
+            tracker.add_tokens(int(getattr(record, "tokens_used", 0) or 0))
 
         if normalize_ws(answer.expected_output) == normalize_ws(test_case.expected.value):
             # INVARIANT: agreement is supporting evidence ONLY. This must stay
