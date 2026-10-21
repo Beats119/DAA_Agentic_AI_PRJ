@@ -499,6 +499,14 @@ class Report(StrictModel):
         return round_half_up_1(v)
 
 
+class StageTiming(StrictModel):
+    """Wall-clock timing for one workflow stage (instrumentation only)."""
+
+    stage: str
+    started_at: datetime
+    duration_s: float
+
+
 class RunManifest(StrictModel):
     run_id: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=_utcnow)
@@ -517,3 +525,6 @@ class RunManifest(StrictModel):
     prompt_versions: dict[str, str] = Field(default_factory=dict)
     # See Report.scoring_policy_version: must match scoring.engine.POLICY_VERSION.
     scoring_policy_version: str = "1.1"
+    # Per-stage wall-clock timings (additive instrumentation). Defaulted
+    # so manifests persisted before this field existed still validate.
+    stage_timings: list[StageTiming] = []

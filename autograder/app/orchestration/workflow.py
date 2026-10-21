@@ -55,6 +55,7 @@ from ..core.schemas import (
     ReproductionInfo,
     RulesRef,
     RunManifest,
+    StageTiming,
     SubmissionRef,
     TestCase,
     TestStats,
@@ -255,19 +256,27 @@ def evaluate(
     run_t0 = time.monotonic()
     _step_name: str | None = None
     _step_t0 = 0.0
+    _step_started_at: datetime | None = None
+    stage_timings: list[StageTiming] = []
 
     def _step_done() -> None:
         nonlocal _step_name
         if _step_name is not None:
+            duration_s = time.monotonic() - _step_t0
             log.info("run %s step %s done in %.1fs",
-                     run_id[:8], _step_name, time.monotonic() - _step_t0)
+                     run_id[:8], _step_name, duration_s)
+            if _step_started_at is not None:
+                stage_timings.append(StageTiming(
+                    stage=_step_name, started_at=_step_started_at,
+                    duration_s=duration_s))
             _step_name = None
 
     def _step(name: str) -> None:
-        nonlocal _step_name, _step_t0
+        nonlocal _step_name, _step_t0, _step_started_at
         _step_done()
         _step_name = name
         _step_t0 = time.monotonic()
+        _step_started_at = datetime.now(timezone.utc)
         log.info("run %s step %s ...", run_id[:8], name)
 
     def _finished(status: str, detail: str = "") -> None:
@@ -355,6 +364,9 @@ def evaluate(
             ),
         )
         validate_report(report)
+        # Close whichever step was open when the run aborted so its
+        # partial timing is recorded in the manifest.
+        _step_done()
         # The manifest is written at finalize with the run's TERMINAL
         # state and finish time (D20) — never a mid-pipeline snapshot.
         manifest = RunManifest(
@@ -365,6 +377,7 @@ def evaluate(
             assignment_hash=assignment_hash,
             rules_hash=rules_hash,
             rules_version=rules.version,
+            stage_timings=stage_timings,
             tool_versions=_tool_versions(rules),
             model_settings={
                 r.task: {"model": r.model, "temperature": r.temperature,
@@ -960,6 +973,9 @@ def evaluate(
         )
         validate_report(report, rules)
 
+        # Close the reporting step so its timing is recorded before the
+        # manifest (which carries the timings) is constructed.
+        _step_done()
         manifest = RunManifest(
             run_id=run_id,
             # Written at finalize (below, just before the terminal state
@@ -979,6 +995,7 @@ def evaluate(
             prompt_versions={r.task: r.prompt_version
                              for r in model_records},
             scoring_policy_version=SCORING_POLICY_VERSION,
+            stage_timings=stage_timings,
         )
 
         # Persist artifacts BEFORE the terminal transition (the store
