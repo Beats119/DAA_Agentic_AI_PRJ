@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from ..core.schemas import StrictModel
+from ..ollama.client import OllamaModelMissing, OllamaUnreachable
 from ..ollama.models import model_cfg_for
 from ..ollama.prompts import load_prompt
 
@@ -548,6 +549,14 @@ def finalize_feedback(
         try:
             payload = evidence_json + prompt_note
             feedback, info = generate_feedback(payload, gateway)
+        except (OllamaUnreachable, OllamaModelMissing) as exc:
+            # The server is unreachable or the model is gone: no later
+            # draft can succeed while that holds, so stop drafting now
+            # instead of burning the remaining attempts against a dead
+            # endpoint (this once cost ~18 minutes per run). The
+            # deterministic fallback below reports what happened.
+            violations = (f"generation attempt {attempts} raised {type(exc).__name__}: {exc}",)
+            break
         except Exception as exc:  # noqa: BLE001 - gateway faults -> retry/fallback
             violations = (f"generation attempt {attempts} raised {type(exc).__name__}: {exc}",)
             prompt_note = ""

@@ -50,7 +50,7 @@ from typing import Any, Callable
 def make_ollama_gateway(
     base_url: str = "http://127.0.0.1:11434",
     timeout_s: float = 120.0,
-    max_retries: int = 2,
+    connect_retries: int = 1,
     backoff_s: float = 1.0,
 ) -> Any:
     """Production gateway factory: a real local Ollama client."""
@@ -58,7 +58,7 @@ def make_ollama_gateway(
 
     return OllamaClient(
         base_url, timeout_s=timeout_s,
-        max_retries=max_retries, backoff_s=backoff_s,
+        connect_retries=connect_retries, backoff_s=backoff_s,
     )
 
 
