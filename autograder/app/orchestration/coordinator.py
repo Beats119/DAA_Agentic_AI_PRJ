@@ -285,6 +285,12 @@ class AnalyzerCoordinator:
         log.info("analyzer %s: %s in %.1fs",
                  entry.job.metric_name, outcome.result.status,
                  time.monotonic() - entry.started)
+        # Make the worker's stderr log discoverable from the coordinator
+        # log for every outcome (success, failure, timeout/kill) — it is
+        # the only place worker-side diagnostics (incl. LLM call logs
+        # from worker-resident analyzers) are written.
+        log.info("analyzer %s: worker log: %s",
+                 entry.job.metric_name, entry.stderr_path)
         return outcome
 
     def _poll(

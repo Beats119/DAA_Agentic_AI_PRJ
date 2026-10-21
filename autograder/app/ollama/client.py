@@ -91,9 +91,18 @@ class OllamaClient:
 
     # -- low-level ---------------------------------------------------------
     def _post(self, path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
-        """POST with bounded retries on transport/5xx errors. No auth headers."""
+        """POST with bounded retries on transport/5xx errors. No auth headers.
+
+        Instrumentation: exactly one INFO line per attempt is logged on
+        the ``autograder.llm`` logger when the attempt concludes —
+        attempt number, path, outcome, and elapsed seconds only; never
+        payload or prompt content.
+        """
         last: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        total = self.max_retries + 1
+        for attempt in range(total):
+            t0 = time.monotonic()
+            status: int | None = None
             try:
                 req = self._transport.build_request(
                     "POST", self.base_url + path, json=payload, timeout=timeout
@@ -103,6 +112,7 @@ class OllamaClient:
                     "refusing to send an Authorization header to Ollama"
                 )
                 resp = self._transport.send(req)
+                status = resp.status_code
                 if resp.status_code >= 500:
                     raise OllamaError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
                 if resp.status_code == 404 and "model" in resp.text.lower():
@@ -112,12 +122,33 @@ class OllamaClient:
                     )
                 resp.raise_for_status()
                 try:
-                    return resp.json()  # type: ignore[no-any-return]
+                    body: dict[str, Any] = resp.json()
                 except ValueError as exc:
                     raise OllamaBadResponse(
                         f"Ollama returned non-JSON: {resp.text[:200]!r}"
                     ) from exc
+                log.info("http attempt %d/%d POST %s -> ok (HTTP %d) in %.1fs",
+                         attempt + 1, total, path, resp.status_code,
+                         time.monotonic() - t0)
+                return body
+            except httpx.HTTPStatusError as exc:
+                # Non-model 4xx from raise_for_status: never retried and
+                # propagates as before — but the attempt still logs.
+                log.info("http attempt %d/%d POST %s -> HTTP %d after %.1fs",
+                         attempt + 1, total, path,
+                         exc.response.status_code, time.monotonic() - t0)
+                raise
             except (httpx.TransportError, httpx.TimeoutException, OllamaError) as exc:
+                if isinstance(exc, (httpx.TransportError, httpx.TimeoutException,
+                                    OllamaBadResponse)):
+                    outcome = type(exc).__name__
+                elif status is not None:
+                    outcome = f"HTTP {status}"
+                else:
+                    outcome = type(exc).__name__
+                log.info("http attempt %d/%d POST %s -> %s after %.1fs",
+                         attempt + 1, total, path, outcome,
+                         time.monotonic() - t0)
                 last = exc
                 if isinstance(exc, (OllamaModelMissing, OllamaBadResponse)):
                     break  # not retryable
