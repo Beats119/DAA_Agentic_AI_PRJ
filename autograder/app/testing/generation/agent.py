@@ -102,6 +102,18 @@ def generate_candidates(
     return result.candidates, [record.model_dump(mode="json")]
 
 
+def _normalize_input(text: str) -> str:
+    """Canonical stdin signature for cross-round duplicate detection.
+
+    Two candidates with the same normalized stdin are duplicates even
+    if their proposed expected outputs differ: one stdin has exactly
+    one true expected output, so admitting both would only re-execute
+    the identical run. (This key is therefore stricter than a
+    stdin+expected pair — deliberately.)
+    """
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
 def candidate_to_testcase(candidate: TestCandidate) -> TestCase:
     """Wrap a validated candidate as a :class:`TestCase`.
 
@@ -235,7 +247,7 @@ def generate_test_suite(
             if cand.id in seen_ids:
                 quarantined.append({"id": cand.id, "reason": "duplicate id"})
                 continue
-            norm = cand.input.strip()
+            norm = _normalize_input(cand.input)
             if norm in seen_inputs:
                 quarantined.append(
                     {"id": cand.id, "reason": "duplicate input of an accepted case"}
@@ -266,7 +278,13 @@ def generate_test_suite(
         )
     else:
         accepted_before, quarantined_before = len(accepted), len(quarantined)
-        initial, recs = generate_candidates(spec, rules, client)
+        # The request must respect the remaining candidate budget
+        # exactly: never ask for more cases than could still be admitted.
+        remaining = max(0, budgets["max_candidates"] - len(accepted))
+        round_max = min(MAX_CASES_PER_ROUND, remaining)
+        round_min = min(MIN_CASES_PER_ROUND, round_max)
+        initial, recs = generate_candidates(
+            spec, rules, client, min_cases=round_min, max_cases=round_max)
         records.extend(recs)
         _account_tokens(recs)
         rounds_used += 1
@@ -320,7 +338,14 @@ def generate_test_suite(
             )
             break
         if len(accepted) == before:
-            break  # refinement produced nothing usable; stop, don't spin
+            # No-progress stop: the round yielded zero new valid
+            # candidates, so further rounds would only re-spend the
+            # budget on the same failure mode. Recorded, not silent.
+            limitations.append(
+                "refinement produced no new valid candidates; "
+                "stopping generation early"
+            )
+            break
 
     covered = {r for tc in accepted for r in tc.requirement_refs}
     return {

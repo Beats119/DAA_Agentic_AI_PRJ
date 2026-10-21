@@ -67,6 +67,21 @@ class OracleService:
                 LLMProposedOracle(),
             ]
         self.strategies = strategies
+        # Generation records collected from LLM-backed strategies (the
+        # Tier-3 second path), drained after each assessment so the
+        # workflow can include them in the manifest and budget totals.
+        self.records: list[Any] = []
+
+    def _drain_records(self) -> None:
+        for strategy in self.strategies:
+            recs = getattr(strategy, "records", None)
+            if recs:
+                for rec in recs:
+                    self.records.append(
+                        rec.model_dump(mode="json")
+                        if hasattr(rec, "model_dump") else rec
+                    )
+                recs.clear()
 
     def _ordered(self, rules: RuleSet) -> list[OracleStrategy]:
         wanted: list[str] = []
@@ -100,6 +115,29 @@ class OracleService:
         chain: list[dict[str, Any]] = []
         winner: OracleVerdict | None = None
         for strategy in self._ordered(rules):
+            if strategy.tier == TIER3 and not rules.oracle.tier3_llm_verification:
+                # Tier-3 is opt-in (OraclePolicy.tier3_llm_verification,
+                # default False): one LLM call per inconclusive candidate
+                # whose best outcome is only "provisional" is not spent
+                # unless the instructor asked for it. Record the skip
+                # HONESTLY in the chain — the candidate's status stays
+                # whatever the earlier tiers decided; a skip is never
+                # represented as a verification.
+                chain.append(
+                    {
+                        "strategy": strategy.name,
+                        "tier": strategy.tier,
+                        "status": "inconclusive",
+                        "method": "llm_independent_path",
+                        "detail": (
+                            "tier3_skipped_by_policy: tier-3 LLM "
+                            "verification is disabled by the rules policy "
+                            "(oracle.tier3_llm_verification=false); "
+                            "not attempted"
+                        ),
+                    }
+                )
+                continue
             verdict = strategy.assess(test_case, spec, ctx)
             chain.append(
                 {
@@ -134,6 +172,7 @@ class OracleService:
                 },
             }
         )
+        self._drain_records()
         return updated, chain
 
     def assess_all(

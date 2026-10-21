@@ -54,7 +54,9 @@ from ..core.schemas import (
     ReportMetric,
     ReproductionInfo,
     RulesRef,
+    RunDiagnostics,
     RunManifest,
+    StageDiagnostics,
     StageTiming,
     SubmissionRef,
     TestCase,
@@ -316,6 +318,59 @@ def evaluate(
         )
     plan: EvaluationPlan | None = None
 
+    # --- diagnostics accumulators (manifest; counts/timings only) ------
+    diag_stage_records: dict[str, list[dict[str, Any]]] = {}
+    diag_oracle_counts: dict[str, int] = {}
+    diag_counters = {"tier3_skipped": 0, "tier3_budget": 0, "rounds": 0}
+    tracker_holder: dict[str, Any] = {}
+
+    def _flat_generation_record(info: Any) -> dict[str, Any] | None:
+        """Unwrap a generation record dict from either pipeline shape."""
+        if not isinstance(info, dict):
+            return None
+        gen = info.get("generation")
+        if isinstance(gen, dict):
+            return gen
+        if "tokens_used" in info:  # flat GenerationRecord dump
+            return info
+        return None
+
+    def _note_records(stage: str, infos: list[Any]) -> None:
+        flats = [f for f in (_flat_generation_record(i) for i in infos)
+                 if f is not None]
+        if flats:
+            diag_stage_records.setdefault(stage, []).extend(flats)
+
+    def _build_diagnostics() -> RunDiagnostics:
+        wall = {t.stage: t.duration_s for t in stage_timings}
+        stages: dict[str, StageDiagnostics] = {}
+        for stage, recs in diag_stage_records.items():
+            stages[stage] = StageDiagnostics(
+                llm_calls=len(recs),
+                prompt_tokens=sum(
+                    int(r.get("prompt_tokens") or 0) for r in recs),
+                output_tokens=sum(
+                    int(r.get("output_tokens") or 0) for r in recs),
+                tokens_used=sum(
+                    int(r.get("tokens_used") or 0) for r in recs),
+                wall_s=wall.get(stage, 0.0),
+            )
+        for name, w in wall.items():
+            stages.setdefault(name, StageDiagnostics(wall_s=w))
+        tracker = tracker_holder.get("tracker")
+        return RunDiagnostics(
+            stages=stages,
+            oracle_trusted=int(diag_oracle_counts.get("trusted", 0)),
+            oracle_provisional=int(diag_oracle_counts.get("provisional", 0)),
+            oracle_rejected=int(diag_oracle_counts.get("rejected", 0)),
+            oracle_inconclusive=int(diag_oracle_counts.get("inconclusive", 0)),
+            tier3_skipped_by_policy=diag_counters["tier3_skipped"],
+            tier3_budget_exhausted=diag_counters["tier3_budget"],
+            generation_rounds=diag_counters["rounds"],
+            sandbox_executions=(int(tracker.execs_used)
+                                if tracker is not None else 0),
+        )
+
     def _go(state: str) -> None:
         store.transition_run(run_id, state)
 
@@ -378,6 +433,7 @@ def evaluate(
             rules_hash=rules_hash,
             rules_version=rules.version,
             stage_timings=stage_timings,
+            diagnostics=_build_diagnostics(),
             tool_versions=_tool_versions(rules),
             model_settings={
                 r.task: {"model": r.model, "temperature": r.temperature,
@@ -496,6 +552,7 @@ def evaluate(
         # (sandbox executions) so the configured budgets bound the
         # evaluation as a whole, not each phase in isolation.
         budget_tracker = BudgetTracker.from_policy(rules.test_generation)
+        tracker_holder["tracker"] = budget_tracker
 
         spec = None
         if gateway is not None:
@@ -522,6 +579,7 @@ def evaluate(
             try:
                 spec, spec_record = extract_specification(doc, gateway)
                 model_records.append(_model_record("specification", spec_record))
+                _note_records("specification", [spec_record])
                 registry.append(
                     "specification_extracted", "specification",
                     {"requirements": len(spec.requirements),
@@ -561,6 +619,8 @@ def evaluate(
             limitations.extend(suite.get("limitations", []))
             for rec in suite["generation_records"]:
                 model_records.append(_model_record("test_generation", rec))
+            _note_records("generating_tests", suite["generation_records"])
+            diag_counters["rounds"] = int(suite["rounds_used"])
             candidates = suite["candidates"]
             quarantined = suite["quarantined"]
             test_stats["generated"] = len(candidates) + len(quarantined)
@@ -645,6 +705,23 @@ def evaluate(
             test_cases, status_counts, chains = service.assess_all(
                 candidates, spec, rules, ctx)
             test_stats["trusted"] = int(status_counts.get("trusted", 0))
+            # Oracle LLM records used to vanish here; they now join the
+            # manifest's model records and the stage diagnostics, and
+            # their tokens were already charged to the shared tracker
+            # by the strategy itself.
+            _note_records("oracle_assessment", service.records)
+            for rec in service.records:
+                model_records.append(_model_record("oracle_second_path", rec))
+            diag_oracle_counts.update(
+                {k: int(v) for k, v in status_counts.items()})
+            for entry in chains:
+                for verdict_info in entry["chain"]:
+                    detail = str(verdict_info.get("detail", ""))
+                    if "tier3_skipped_by_policy" in detail:
+                        diag_counters["tier3_skipped"] += 1
+                    elif "budget_exhausted" in detail \
+                            and verdict_info.get("tier") == "tier3_llm":
+                        diag_counters["tier3_budget"] += 1
             registry.append(
                 "oracle_assessment", "oracle",
                 {"status_counts": dict(status_counts),
@@ -785,6 +862,25 @@ def evaluate(
                 "diagnostics": _remap_diag(res.diagnostics),
             })
         results = remapped
+        # Analyzer LLM records live inside analyzer diagnostics (e.g.
+        # readability's code-review generation record); collect them for
+        # the manifest diagnostics so analyzer inference is counted too.
+        analyzer_records: list[Any] = []
+
+        def _collect_gen_records(value: Any) -> None:
+            if isinstance(value, dict):
+                gen = value.get("generation")
+                if isinstance(gen, dict) and "tokens_used" in gen:
+                    analyzer_records.append(gen)
+                for v in value.values():
+                    _collect_gen_records(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _collect_gen_records(v)
+
+        for _res in results.values():
+            _collect_gen_records(_res.diagnostics)
+        _note_records("analyzing", analyzer_records)
         for name, res in results.items():
             for w in res.warnings:
                 warnings.append(f"[{name}] {w}")
@@ -856,6 +952,7 @@ def evaluate(
         feedback: FeedbackText = feedback_out["feedback"]
         for rec in feedback_out.get("generation_records", []):
             model_records.append(_model_record("feedback", rec))
+        _note_records("feedback", feedback_out.get("generation_records", []))
         if feedback_out["used_fallback"]:
             limitations.append(
                 "feedback rendered by the deterministic fallback "
@@ -1015,6 +1112,7 @@ def evaluate(
                              for r in model_records},
             scoring_policy_version=SCORING_POLICY_VERSION,
             stage_timings=stage_timings,
+            diagnostics=_build_diagnostics(),
         )
 
         # Persist artifacts BEFORE the terminal transition (the store
