@@ -19,9 +19,17 @@ a required metric without evidence becomes ``incomplete`` — never a silent
 Fresh-run vs reproduction: every input hash, tool version, model id and
 prompt version is recorded in the RunManifest. Identical validated evidence
 + identical rules -> identical score (the scoring engine is deterministic).
-LLM steps (spec extraction, test generation, feedback drafting) may vary
-between runs within the documented acceptance bar; test generation is fresh
-every run by design, never served from a cache.
+
+Per-assignment cache (product policy, 2026-10-22): the extracted
+specification and the oracle-validated test set do not depend on the
+student, so they are generated ONCE per assignment and reused for later
+evaluations of the same assignment (see :mod:`.cache`). Reuse is keyed
+by an assignment fingerprint plus the exact rules-config hash, is
+recorded in the manifest diagnostics and the report, and never promotes
+an oracle status. All student-specific work — compile, sandboxed
+execution, analyzers, scoring, feedback — is fresh on every run.
+``force_regenerate`` (or the rules knob
+``test_generation.reuse_cached_testset: false``) bypasses cache reads.
 """
 
 from __future__ import annotations
@@ -165,6 +173,33 @@ def _no_llm_record(task: str) -> ModelRecord:
     )
 
 
+def _cached_model_record(task: str, entry: Any) -> ModelRecord:
+    """Provenance for a task whose output was reused from the cache.
+
+    Model id and prompt version are the ones the cache entry recorded
+    when the producing run created it. Temperature/seed/limits come
+    from the current model config — the assignment fingerprint covers
+    the configured model name, so a config that named a different model
+    would have missed the cache entirely.
+    """
+    from ..ollama.models import model_cfg_for
+
+    try:
+        cfg = model_cfg_for(task)
+    except Exception:  # noqa: BLE001 - provenance must never fail a run
+        cfg = {}
+    return ModelRecord(
+        task=task,
+        model=str(entry.model_names.get(task)
+                  or cfg.get("model") or "unknown"),
+        temperature=float(cfg.get("temperature", 0.0) or 0.0),
+        seed=cfg.get("seed"),
+        timeout_s=float(cfg.get("timeout_s", 0) or 0),
+        max_tokens=int(cfg.get("max_tokens", 0) or 0),
+        prompt_version=str(entry.prompt_versions.get(task) or "unknown"),
+    )
+
+
 def _gateway_spec(gateway: Any | None) -> dict[str, Any] | None:
     """Name the factory an analyzer worker uses to rebuild the gateway.
 
@@ -234,6 +269,7 @@ def evaluate(
     evaluation_timeout_s: float = 1800.0,
     store: RunStore | None = None,
     feedback_llm_check: bool | None = None,
+    force_regenerate: bool = False,
 ) -> RunResult:
     """Run one full evaluation. See the module docstring for the flow.
 
@@ -241,6 +277,10 @@ def evaluate(
     of feedback drafts (default off; when None it is resolved from the
     ``AUTOGRADER_FEEDBACK_LLM_CHECK`` env var). The deterministic
     verifier remains authoritative either way.
+
+    ``force_regenerate`` bypasses per-assignment cache READS for this
+    run (specification and test set are produced fresh); a qualifying
+    fresh result still updates the cache.
     """
     if feedback_llm_check is None:
         feedback_llm_check = os.environ.get(
@@ -299,6 +339,15 @@ def evaluate(
     rh = hash_rules(rules)
     rules_hash = rh if rh.startswith("sha256:") else "sha256:" + rh
 
+    # Per-assignment cache identity: a pure function of the assignment
+    # bytes, the configured model names and the prompt versions/hashes.
+    # None (unreadable config/prompts) disables the cache for this run;
+    # the run then proceeds uncached rather than failing.
+    from .cache import build_fingerprint
+
+    cache_info = build_fingerprint(assignment_bytes)
+    cache_dir = artifacts_base / "assignment_cache"
+
     # Share the caller's store when one is supplied (the API passes its
     # own, so a process never holds two RunStore instances on one DB —
     # D26); otherwise open one rooted at the artifacts base.
@@ -323,6 +372,14 @@ def evaluate(
     diag_oracle_counts: dict[str, int] = {}
     diag_counters = {"tier3_skipped": 0, "tier3_budget": 0, "rounds": 0}
     tracker_holder: dict[str, Any] = {}
+    # Per-assignment cache outcome (provenance for the diagnostics).
+    cache_diag: dict[str, Any] = {
+        "fingerprint": cache_info.fingerprint if cache_info else "",
+        "spec_hit": False,
+        "testset_hit": False,
+        "source_run_id": None,
+        "source_created_at": None,
+    }
 
     def _flat_generation_record(info: Any) -> dict[str, Any] | None:
         """Unwrap a generation record dict from either pipeline shape."""
@@ -369,6 +426,12 @@ def evaluate(
             generation_rounds=diag_counters["rounds"],
             sandbox_executions=(int(tracker.execs_used)
                                 if tracker is not None else 0),
+            cache_fingerprint=(str(cache_diag["fingerprint"])[:16]
+                               if cache_diag["fingerprint"] else ""),
+            cache_spec_hit=bool(cache_diag["spec_hit"]),
+            cache_testset_hit=bool(cache_diag["testset_hit"]),
+            cache_source_run_id=cache_diag["source_run_id"],
+            cache_source_created_at=cache_diag["source_created_at"],
         )
 
     def _go(state: str) -> None:
@@ -554,7 +617,69 @@ def evaluate(
         budget_tracker = BudgetTracker.from_policy(rules.test_generation)
         tracker_holder["tracker"] = budget_tracker
 
+        # --- per-assignment cache lookup -------------------------------
+        # Reads are gated by the rules knob and the per-run force flag.
+        # A missing/corrupt/invalid entry is a miss (the cache module
+        # logs a warning); it never fails the run.
+        from .cache import load_cache_entry
+
+        cache_reads = (
+            cache_info is not None
+            and bool(rules.test_generation.reuse_cached_testset)
+            and not force_regenerate
+        )
+        cache_entry = (
+            load_cache_entry(cache_dir, cache_info.fingerprint)
+            if cache_reads and cache_info is not None else None
+        )
+        cached_testset = (
+            cache_entry.testsets.get(rules_hash)
+            if cache_entry is not None else None
+        )
+
         spec = None
+        spec_from_cache = False
+        if cache_entry is not None:
+            spec = cache_entry.spec.specification
+            spec_from_cache = True
+            cache_diag["spec_hit"] = True
+            cache_diag["source_run_id"] = cache_entry.spec.source_run_id
+            cache_diag["source_created_at"] = cache_entry.spec.created_at
+            log.info(
+                "run %s specification: assignment-cache hit "
+                "(fingerprint %s, produced by run %s) — LLM extraction "
+                "skipped", run_id[:8],
+                cache_info.fingerprint[:16] if cache_info else "",
+                cache_entry.spec.source_run_id[:8])
+            registry.append(
+                "specification_cache_hit", "assignment_cache",
+                {"fingerprint": (cache_info.fingerprint
+                                 if cache_info else ""),
+                 "source_run_id": cache_entry.spec.source_run_id,
+                 "source_created_at":
+                     cache_entry.spec.created_at.isoformat(),
+                 "requirements": len(spec.requirements),
+                 "examples": len(spec.examples),
+                 "ambiguities": len(spec.ambiguities)},
+                affects_grade=False,
+            )
+            if gateway is None:
+                # The pre-seeded "no LLM ran" provenance must not claim
+                # no model produced the tasks this run actually reused.
+                reused_tasks = {"specification"}
+                if cached_testset is not None:
+                    reused_tasks.add("test_generation")
+                model_records[:] = [
+                    r for r in model_records
+                    if not (r.task in reused_tasks
+                            and r.model == "none (llm unavailable)")
+                ]
+            model_records.append(
+                _cached_model_record("specification", cache_entry))
+            if cached_testset is not None:
+                model_records.append(
+                    _cached_model_record("test_generation", cache_entry))
+
         if gateway is not None:
             # Best-effort warm-up: a cold model load (~90s) must not
             # land inside the specification call's idle window. Only
@@ -576,25 +701,28 @@ def evaluate(
                         "run %s warm-up failed: %s — continuing; "
                         "task calls will surface errors", run_id[:8], exc)
             _step("specification")
-            try:
-                spec, spec_record = extract_specification(doc, gateway)
-                model_records.append(_model_record("specification", spec_record))
-                _note_records("specification", [spec_record])
-                registry.append(
-                    "specification_extracted", "specification",
-                    {"requirements": len(spec.requirements),
-                     "examples": len(spec.examples),
-                     "ambiguities": len(spec.ambiguities),
-                     "post_validation_notes": spec_record.get(
-                         "post_validation_notes", [])},
-                    affects_grade=False,
-                )
-            except SpecificationError as exc:
-                limitations.append(
-                    f"specification extraction failed ({exc}); "
-                    "test generation impossible, correctness will be inconclusive"
-                )
-        else:
+            if spec is None:
+                try:
+                    spec, spec_record = extract_specification(doc, gateway)
+                    model_records.append(
+                        _model_record("specification", spec_record))
+                    _note_records("specification", [spec_record])
+                    registry.append(
+                        "specification_extracted", "specification",
+                        {"requirements": len(spec.requirements),
+                         "examples": len(spec.examples),
+                         "ambiguities": len(spec.ambiguities),
+                         "post_validation_notes": spec_record.get(
+                             "post_validation_notes", [])},
+                        affects_grade=False,
+                    )
+                except SpecificationError as exc:
+                    limitations.append(
+                        f"specification extraction failed ({exc}); "
+                        "test generation impossible, correctness will be "
+                        "inconclusive"
+                    )
+        elif spec is None:
             _step("generating_tests")
             log.info("run %s no LLM gateway: specification extraction and "
                      "test generation skipped", run_id[:8])
@@ -602,6 +730,9 @@ def evaluate(
                 "no LLM gateway for this run: specification extraction and "
                 "test generation skipped; correctness will be inconclusive"
             )
+        else:
+            log.info("run %s no LLM gateway: specification reused from "
+                     "the assignment cache", run_id[:8])
 
         # Refresh the plan with the spec as it actually turned out (D16):
         # only a genuinely missing spec earns the plan's spec warning.
@@ -612,7 +743,57 @@ def evaluate(
         test_cases: list[TestCase] = []
         test_stats = {"generated": 0, "validated": 0, "executed": 0,
                       "rejected": 0, "trusted": 0}
-        if spec is not None and gateway is not None:
+        reuse_note: str | None = None
+        if spec is not None and cached_testset is not None:
+            # --- assignment-cache hit: reuse the assessed set verbatim.
+            # Generation rounds and oracle assessment are skipped; the
+            # student's code is still compiled and executed against
+            # these tests below, exactly as for a fresh set. Statuses
+            # and provenance are the original assessment's — reuse never
+            # promotes anything.
+            _step("generating_tests")
+            _step("oracle_assessment")
+            test_cases = list(cached_testset.tests)
+            counts = cached_testset.counts
+            test_stats["generated"] = int(
+                counts.get("generated", len(test_cases)))
+            test_stats["validated"] = int(
+                counts.get("validated", len(test_cases)))
+            test_stats["rejected"] = int(counts.get("rejected", 0))
+            cached_status_counts: dict[str, int] = {}
+            for tc in test_cases:
+                cached_status_counts[tc.status] = (
+                    cached_status_counts.get(tc.status, 0) + 1)
+            test_stats["trusted"] = int(
+                cached_status_counts.get("trusted", 0))
+            diag_oracle_counts.update(
+                {k: int(v) for k, v in cached_status_counts.items()})
+            cache_diag["testset_hit"] = True
+            cache_diag["source_run_id"] = cached_testset.source_run_id
+            cache_diag["source_created_at"] = cached_testset.created_at
+            registry.append(
+                "testset_cache_hit", "assignment_cache",
+                {"fingerprint": (cache_info.fingerprint
+                                 if cache_info else ""),
+                 "rules_hash": rules_hash,
+                 "source_run_id": cached_testset.source_run_id,
+                 "source_created_at":
+                     cached_testset.created_at.isoformat(),
+                 "tests": len(test_cases),
+                 "status_counts": cached_status_counts},
+                affects_grade=False,
+            )
+            reuse_note = (
+                f"Test set reused from run {cached_testset.source_run_id} "
+                f"(generated "
+                f"{cached_testset.created_at.isoformat(timespec='seconds')}) "
+                "for this assignment; no new tests were generated for "
+                "this run."
+            )
+            log.info("run %s test set: assignment-cache hit — %d assessed "
+                     "tests reused from run %s", run_id[:8],
+                     len(test_cases), cached_testset.source_run_id[:8])
+        elif spec is not None and gateway is not None:
             _step("generating_tests")
             suite = generate_test_suite(
                 spec, rules, gateway, budget_tracker=budget_tracker)
@@ -736,6 +917,50 @@ def evaluate(
                 limitations.append(
                     "no generated test achieved a trusted oracle verdict; "
                     "correctness cannot be confirmed from test evidence")
+
+            # --- per-assignment cache write ----------------------------
+            # Only a successful generation is cached: this branch means
+            # spec extraction succeeded, and the write additionally
+            # requires >= 1 trusted test. A failed/empty generation
+            # writes nothing, so a later run retries instead of
+            # inheriting a bad set. Write failures are logged, never
+            # fatal — the cache is an optimization, not evidence.
+            if cache_info is not None and test_stats["trusted"] >= 1:
+                try:
+                    from .cache import CachedTestSet, record_cache_write
+
+                    record_cache_write(
+                        cache_dir, cache_info,
+                        run_id=run_id,
+                        spec=spec,
+                        spec_is_fresh=not spec_from_cache,
+                        testset=CachedTestSet(
+                            created_at=datetime.now(timezone.utc),
+                            source_run_id=run_id,
+                            rules_hash=rules_hash,
+                            tests=list(test_cases),
+                            counts={
+                                "generated": test_stats["generated"],
+                                "validated": test_stats["validated"],
+                                "rejected": test_stats["rejected"],
+                                "trusted": test_stats["trusted"],
+                            },
+                        ),
+                    )
+                    log.info("run %s assignment cache updated "
+                             "(fingerprint %s)", run_id[:8],
+                             cache_info.fingerprint[:16])
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    log.warning("run %s assignment cache write failed: %s",
+                                run_id[:8], exc)
+
+        if spec is not None and gateway is None and cached_testset is None:
+            # Spec came from the cache but no test set exists for these
+            # rules and there is no gateway to generate one.
+            limitations.append(
+                "no LLM gateway for this run: test generation skipped "
+                "(specification reused from the assignment cache); "
+                "correctness will be inconclusive")
 
         # ---------------- executing ----------------
         _go("executing")
@@ -1079,11 +1304,13 @@ def evaluate(
                 notes=(
                     "Deterministic scoring: identical (assignment, source, "
                     "rules, tool versions, model ids, prompt versions) and "
-                    "identical validated evidence -> identical score. LLM "
-                    "steps (spec extraction, test generation, feedback "
-                    "drafting) may vary between runs within the +/-7 "
-                    "grade-point acceptance bar; test generation is fresh "
-                    "every run by design, never served from a cache."
+                    "identical validated evidence -> identical score. The "
+                    "specification and the oracle-validated test set are "
+                    "generated once per assignment and reused from the "
+                    "per-assignment cache by later evaluations of the same "
+                    "assignment; feedback drafting may vary between runs "
+                    "within the +/-7 grade-point acceptance bar."
+                    + (f" {reuse_note}" if reuse_note else "")
                 ),
             ),
         )
