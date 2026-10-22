@@ -21,7 +21,8 @@ server-rendered Jinja2 templates; every workflow is also a REST endpoint.
         |
  Orchestrator (autograder/app/orchestration/)
    hash inputs -> validate rules -> ingest PDF -> spec agent (LLM)
-   -> test generation (LLM, fresh every run, bounded refinement)
+   -> test generation (LLM, once per assignment, bounded refinement;
+      oracle-validated set cached per assignment and reused per student)
    -> tiered oracle (trusted/provisional/rejected/inconclusive)
    -> compile in sandbox -> analyzers (bounded parallel)
    -> deterministic scoring -> feedback (generate + verify)

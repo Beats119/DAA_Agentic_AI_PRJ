@@ -1,12 +1,14 @@
-"""Scenario coverage: fresh generation across runs + concurrent evaluations.
+"""Scenario coverage: regeneration + concurrent evaluations.
 
-Two governing-spec guarantees get explicit tests here (they were only
-implicit before):
+Two guarantees get explicit tests here:
 
-1. **Fresh generation every run** — there is no test-suite cache. A
-   shared gateway instance serving two evaluations must be *called*
-   again for the second run, and the second run's evidence must come
-   from the second response, not the first run's suite.
+1. **Forced regeneration is really fresh** — the per-assignment cache
+   (see ``tests/unit/test_assignment_cache.py``) reuses the validated
+   test set for later evaluations of the same assignment by default,
+   but a run that forces regeneration (``force_regenerate=True``, the
+   CLI's ``--force-regenerate``) must *call* generation again, and its
+   evidence must come from its own fresh response, not the cached
+   suite. Default-reuse behavior is pinned by the cache tests.
 2. **Concurrent evaluations** — two evaluations running in parallel
    threads complete independently: no shared-state contamination, no
    crossed evidence, no database/artifact interference.
@@ -68,13 +70,18 @@ def _evidence_text(result) -> str:
     return (Path(result.artifacts_dir) / "evidence.json").read_text()
 
 
-def test_each_run_generates_fresh_tests(assignment_pdf, rules_path,  # noqa: F811
-                                        source_path, tmp_path):  # noqa: F811
-    """Run 2 must call the gateway again and use ITS response."""
+def test_forced_regeneration_generates_fresh_tests(  # noqa: F811
+        assignment_pdf, rules_path, source_path, tmp_path):  # noqa: F811
+    """A forced run must call the gateway again and use ITS response.
+
+    Both runs share one artifacts base, so run 2 sits on top of run
+    1's cache entry; only the force flag stands between it and reuse.
+    """
     gateway = CountingGateway()
+    base = tmp_path / "shared"
 
     r1 = _run(assignment_pdf, rules_path, source_path,
-              tmp_path / "a", gateway=gateway, run_id="fresh_a")
+              base, gateway=gateway, run_id="fresh_a")
     assert r1.status == "completed", r1.report.limitations
     calls_after_run1 = gateway.gen_calls
     assert calls_after_run1 >= 1
@@ -83,9 +90,10 @@ def test_each_run_generates_fresh_tests(assignment_pdf, rules_path,  # noqa: F81
     assert "_g2" not in _evidence_text(r1)
 
     r2 = _run(assignment_pdf, rules_path, source_path,
-              tmp_path / "b", gateway=gateway, run_id="fresh_b")
+              base, gateway=gateway, run_id="fresh_b",
+              force_regenerate=True)
     assert r2.status == "completed", r2.report.limitations
-    # The gateway was consulted AGAIN — no cached suite was reused…
+    # The gateway was consulted AGAIN — the cached suite was bypassed…
     assert gateway.gen_calls > calls_after_run1
     assert r2.report.test_stats.generated >= 3
     # …and run 2's persisted evidence is built from the later response:

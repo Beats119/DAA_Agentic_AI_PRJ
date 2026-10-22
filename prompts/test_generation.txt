@@ -1,5 +1,5 @@
 ---
-version: "1.1"
+version: "1.2"
 task: test_generation
 model_hint: llama3.1
 temperature: 0
@@ -33,7 +33,8 @@ RULES:
 2. expected_value is your best computation of the exact stdout — arithmetic
    and formatting (spaces, newlines) must match the spec exactly.
 3. Cite the requirement IDs each case covers in requirement_refs.
-4. rationale: one sentence — what the case probes and why it matters.
+4. rationale: ONE short phrase, at most ~12 words — what the case probes,
+   nothing more.
 5. Unique IDs: T1, T2, … Keep inputs small (well under a second of runtime).
 6. No provenance or trust claims — that is the oracle's job.
 
@@ -43,8 +44,9 @@ cases, and no filler cases just to reach the count.
 OUTPUT CONTRACT — reply with strict JSON only, one object holding
 {min_cases} to {max_cases} candidates:
 {"candidates": [{"id": "T1", "input": "<stdin text>", "input_category":
-"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<one
-sentence>", "requirement_refs": ["R1"], "expected_value": "<exact stdout>"}]}
+"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<short
+phrase, at most ~12 words>", "requirement_refs": ["R1"], "expected_value":
+"<exact stdout>"}]}
 
 Example output:
 {"candidates":[{"id":"T1","input":"1 2 3\n","input_category":"normal","rationale":"Covers R1 with a minimal multi-value input.","requirement_refs":["R1"],"expected_value":"6\n"},{"id":"T2","input":"","input_category":"edge","rationale":"Empty input: under R1 the sum is 0.","requirement_refs":["R1"],"expected_value":"0\n"}]}

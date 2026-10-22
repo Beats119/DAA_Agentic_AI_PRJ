@@ -110,6 +110,19 @@ def test_example_output_validates_against_schema(name: str) -> None:
     assert instance is not None
 
 
+@pytest.mark.parametrize("name", ["test_generation", "test_refinement"])
+def test_generation_templates_cap_the_rationale(name: str) -> None:
+    """Generation prompts: one-phrase rationale, version pinned at 1.2.
+
+    The version bump is load-bearing: prompt versions feed the
+    per-assignment cache fingerprint, so shipping the brevity change
+    under the old version would silently reuse stale test sets.
+    """
+    front_matter, body = load_prompt(name)
+    assert str(front_matter.get("version")) == "1.2"
+    assert "~12 words" in body, f"{name}: no rationale length instruction"
+
+
 def test_feedback_example_cites_only_input_evidence_ids() -> None:
     """The feedback example must not teach inventing evidence IDs."""
     _, body = load_prompt("feedback")

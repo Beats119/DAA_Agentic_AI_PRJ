@@ -42,6 +42,13 @@ how far a flaky guess can move the score (it can only ever become
 given evidence. Acceptance bar: max deviation ≤ 7.0 across repeated runs
 (measured 0.00 with deterministic stand-in; real-LLM measurement belongs on
 the Ollama machine — see [docs/VARIANCE.md](docs/VARIANCE.md)).
+**Per-assignment cache (2026-10-22):** the specification and the
+oracle-validated test set are now generated once per assignment and
+reused for every student of that assignment, so this variation is paid
+once per assignment generation rather than once per student — every
+student of an assignment is graded against the *same* test set. That
+removes per-student test-set luck and replaces it with the shared-fate
+risk documented in §11.
 
 ## 4. Similarity is resemblance, not authorship proof
 
@@ -153,6 +160,30 @@ procedure in [docs/OLLAMA.md](docs/OLLAMA.md) on the target machine and
 record real variance in [docs/VARIANCE.md](docs/VARIANCE.md). Until
 then, treat LLM-dependent acceptance items as BLOCKED–ENVIRONMENT
 (`docs/ACCEPTANCE.md` #5, #17, #22).
+
+## 11. A cached test set is shared by every student of the assignment
+
+**Unreliable-verdict scenario:** the single generation run for an
+assignment produces a test whose expected output is subtly wrong, yet a
+Tier-1/Tier-2 oracle path marks it `trusted`. That test is then reused
+for *every* student of the assignment: a correct submission can lose
+the same points in run after run until someone regenerates the set.
+(Under the previous generate-per-run policy, such a flaw typically
+affected a single run.)
+**Why the cache is still safe to use:** only oracle-validated sets are
+cached — a generation is written only when spec extraction succeeded
+and at least one test reached `trusted`; a failed or empty generation
+writes nothing, so the next run retries instead of inheriting a bad
+set. Reuse never promotes an oracle status, and every reusing report
+names the producing run and its generation time in its notes and in
+the manifest diagnostics, so a bad set is traceable to exactly one
+generation.
+**Mitigation:** if a cached set is suspect, regenerate it —
+`--force-regenerate` on the CLI, or
+`test_generation.reuse_cached_testset: false` in the rules — and
+prefer Tier-1 anchors (an instructor reference solution or expected
+outputs) for high-stakes assignments, since Tier-1 evidence is what
+makes a cached set worth trusting repeatedly.
 
 ## Platform & process caveats
 

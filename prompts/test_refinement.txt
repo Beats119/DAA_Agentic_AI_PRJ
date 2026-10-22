@@ -1,5 +1,5 @@
 ---
-version: "1.1"
+version: "1.2"
 task: test_refinement
 model_hint: llama3.1
 temperature: 0
@@ -35,6 +35,7 @@ RULES:
 2. For cases rejected because their expected output could not be trusted,
    prefer inputs whose expected output is directly checkable against the
    spec's examples or stated invariants — say which one in the rationale.
+   Keep every rationale to ONE short phrase, at most ~12 words.
 3. For cases rejected as ambiguity-dependent, reformulate so the expected
    output does not depend on the ambiguity, or omit the case.
 4. Target the uncovered requirements first; cite the requirement IDs each
@@ -48,8 +49,9 @@ rejection or cover an uncovered requirement.
 OUTPUT CONTRACT — reply with strict JSON only, one object holding up to
 {max_new} candidates, with fresh IDs starting at {next_id}:
 {"candidates": [{"id": "T<n>", "input": "<stdin text>", "input_category":
-"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<one
-sentence>", "requirement_refs": ["R1"], "expected_value": "<exact stdout>"}]}
+"normal|edge|boundary|tricky|invalid|discriminating", "rationale": "<short
+phrase, at most ~12 words>", "requirement_refs": ["R1"], "expected_value":
+"<exact stdout>"}]}
 
 Example output:
-{"candidates":[{"id":"T7","input":"5\n","input_category":"boundary","rationale":"Single-element case covering uncovered R3; expected output matches the spec example on page 1.","requirement_refs":["R3"],"expected_value":"5\n"}]}
+{"candidates":[{"id":"T7","input":"5\n","input_category":"boundary","rationale":"Covers uncovered R3; matches spec example, page 1.","requirement_refs":["R3"],"expected_value":"5\n"}]}

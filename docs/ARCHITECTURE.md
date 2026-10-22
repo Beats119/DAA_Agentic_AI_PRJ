@@ -11,7 +11,7 @@
 | Planner | `app/orchestration/planner.py` | Builds the metric-specific evaluation plan from spec + rules |
 | Coordinator | `app/orchestration/coordinator.py` | One subprocess per analyzer with hard per-analyzer deadlines (TERM → grace → KILL of the worker's process group, incl. sandbox descendants) and an overall evaluation timeout (default 1800 s); deterministic result assembly in metric order regardless of completion order |
 | Ollama gateway | `app/ollama/` | Loopback-only client, structured generation with Pydantic validation, health/model probes, versioned prompt loading |
-| Test generation | `app/testing/generation/` | Fresh LLM candidate tests every run; bounded refinement (≤3 rounds), budgets, quarantine with reasons |
+| Test generation | `app/testing/generation/` | LLM candidate tests generated once per assignment; bounded refinement (≤3 rounds), budgets, quarantine with reasons; the oracle-validated set is cached per assignment (`app/orchestration/cache.py`) and reused for later students |
 | Oracle | `app/testing/oracle/` | Tiered strategies + `OracleService` (tier-preference order, first non-`inconclusive` verdict wins, full provenance chain) |
 | Sandbox | `app/sandbox/` | Sandbox 2.0: capability probe + mandatory policy (`sandbox/policy.py`, env `AUTOGRADER_SANDBOX_POLICY`); a dedicated launcher process applies mandatory netns, rlimits, privilege drop (uid 65534 when root-run), `no_new_privs`, a narrow Landlock allowlist, and a seccomp profile before exec — any mandatory failure refuses the run; sandboxed compiler |
 | Analyzers | `app/analyzers/` | 8 analyzers, common `analyze(ctx) -> AnalyzerResult` contract |
@@ -31,10 +31,14 @@
 4. **Specification agent** extracts requirements/examples/ambiguities (LLM).
    Explicit vs inferred vs ambiguous kept separate; assumptions never become
    grading rules silently.
-5. **Test generation**: fresh LLM candidates every run (categories are
-   reasoning prompts, not a fixed suite) → deterministic candidate
-   validation → **bounded refinement loop** (max 3 rounds, candidate/token/
-   execution budgets) → quarantine with recorded reasons.
+5. **Test generation**: LLM candidates generated once per assignment
+   (categories are reasoning prompts, not a fixed suite) → deterministic
+   candidate validation → **bounded refinement loop** (max 3 rounds,
+   candidate/token/execution budgets) → quarantine with recorded reasons.
+   The assessed set is then cached under the assignment fingerprint +
+   rules hash; later evaluations of the same assignment skip straight
+   to the oracle gate's recorded verdicts (step 6) and execute the
+   student's code against the reused set.
 6. **Oracle gate**: each candidate assessed by tiered strategies:
    - **Tier 1** — instructor reference solution / expected outputs, compiled
      and run in the same sandbox (the reference itself is validated against
