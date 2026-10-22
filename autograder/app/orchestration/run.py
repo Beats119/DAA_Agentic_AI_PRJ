@@ -57,6 +57,7 @@ def run_evaluation(
     base_dir: str | Path | None = None,
     max_workers: int = 4,
     evaluation_timeout_s: float = 1800.0,
+    force_regenerate: bool = False,
     _probe_gateway: bool = True,
 ) -> RunResult:
     """Run one evaluation, wiring the gateway unless one is supplied."""
@@ -74,6 +75,7 @@ def run_evaluation(
         base_dir=base_dir,
         max_workers=max_workers,
         evaluation_timeout_s=evaluation_timeout_s,
+        force_regenerate=force_regenerate,
     )
 
 
@@ -128,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-workers", type=int, default=4)
     parser.add_argument("--evaluation-timeout-s", type=float, default=1800.0,
                         help="overall deadline for the analyzer phase")
+    parser.add_argument("--force-regenerate", action="store_true",
+                        help="bypass the per-assignment cache: extract the "
+                             "specification and generate tests fresh for "
+                             "this run (a successful fresh result still "
+                             "updates the cache)")
     args = parser.parse_args(argv)
 
     base = Path(args.base_dir or Path.cwd() / "artifacts")
@@ -140,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 gateway=None, run_id=args.run_id, base_dir=base,
                 max_workers=args.max_workers,
                 evaluation_timeout_s=args.evaluation_timeout_s,
+                force_regenerate=args.force_regenerate,
             )
         else:
             result = run_evaluation(
@@ -147,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 gateway_url=args.ollama_url, run_id=args.run_id,
                 base_dir=base, max_workers=args.max_workers,
                 evaluation_timeout_s=args.evaluation_timeout_s,
+                force_regenerate=args.force_regenerate,
             )
     except WorkflowError as exc:
         rid = _failed_record(base, str(exc), args.run_id)

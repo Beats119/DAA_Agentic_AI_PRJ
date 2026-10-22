@@ -3,9 +3,12 @@
 Two halves with a hard boundary between them:
 
 1. **Generation** (LLM, via the gateway) drafts student feedback from
-   *validated evidence only*. The model receives a JSON dump of evidence
-   records — read-only data. It never sees the grade and cannot touch the
-   scoring engine or the evidence registry.
+   *validated evidence only*. The model receives a JSON dump of the
+   citable subset of the evidence registry (confirmed failures, analyzer
+   findings, metric summaries, limitations — see
+   :func:`build_feedback_prompt_payload`) — read-only data. It never
+   sees the grade and cannot touch the scoring engine or the evidence
+   registry.
 
 2. **Verification** (deterministic, no LLM) checks the draft:
    - every cited evidence id exists in the finalized registry;
@@ -45,6 +48,7 @@ analyzer evidence: it only ever receives read-only copies.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -480,6 +484,145 @@ def deterministic_fallback(
     )
 
 
+# --- feedback prompt payload trimming (latency) ---------------------------
+# The generate prompt used to embed ``registry.to_json()`` — the FULL
+# evidence registry (~10.6k chars on a real run), re-read by the model on
+# every draft attempt at slow local prompt-eval speeds. But a feedback
+# draft may only discuss confirmed failures, metric results, and stated
+# limitations, and :func:`verify_feedback` checks every claim against the
+# registry OBJECT server-side — never against the prompt text. So the
+# generate prompt now carries a citable subset:
+#
+# - ``test_result`` records are included ONLY for confirmed failures
+#   (``data.passed is False`` or an id the caller lists as failing);
+#   passing outcomes are summarized by count, never serialized per test.
+# - Every other record is included — when in doubt an entry stays — but
+#   bulky raw fields are stripped (see ``_PAYLOAD_DROP_KEYS``) and any
+#   remaining long string is truncated (see the caps below). A ``tests_
+#   generated`` record's quarantined-candidate list collapses to a count.
+# - Context entries WITHOUT evidence ids are appended (metric summaries,
+#   trusted-test outcome counts, the run's limitations). They carry no id,
+#   so they can never be cited as evidence.
+#
+# The deterministic verifier and the opt-in LLM audit keep receiving the
+# full registry / full ``evidence_json`` exactly as before — only the
+# generate prompt's serialization changes.
+
+# Raw blobs that duplicate parsed data in the same record; pure prompt bulk.
+_PAYLOAD_DROP_KEYS = frozenset({
+    "raw_stderr", "raw_stdout", "raw_output", "raw_tail", "source_code",
+    "unified_diff", "diff",
+})
+# Generic cap for any string field inside a kept record.
+_PAYLOAD_FIELD_CAP = 800
+# A failing test's input/expected/actual are what the feedback explains,
+# so they keep a larger (still bounded) budget.
+_PAYLOAD_IO_FIELDS = frozenset({"input", "expected", "actual"})
+_PAYLOAD_IO_CAP = 2000
+
+
+def _truncate_for_payload(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"…[truncated {len(text) - cap} chars]"
+
+
+def _strip_payload_value(value: Any, *, key: str | None = None) -> Any:
+    """Recursively strip/cap one payload value (see the rules above)."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if k in _PAYLOAD_DROP_KEYS:
+                continue
+            if k == "quarantined" and isinstance(v, list):
+                # The feedback may state HOW MANY candidates were
+                # quarantined, never their contents.
+                out[k] = {"count": len(v)}
+                continue
+            out[k] = _strip_payload_value(v, key=k)
+        return out
+    if isinstance(value, list):
+        return [_strip_payload_value(v) for v in value]
+    if isinstance(value, str):
+        cap = _PAYLOAD_IO_CAP if key in _PAYLOAD_IO_FIELDS else _PAYLOAD_FIELD_CAP
+        return _truncate_for_payload(value, cap)
+    return value
+
+
+def build_feedback_prompt_payload(
+    evidence_json: str,
+    *,
+    trusted_results: dict[str, dict[str, Any]] | None = None,
+    failing_tests: list[dict[str, Any]] | None = None,
+    metric_scores: dict[str, float | None] | None = None,
+    analyzer_statuses: dict[str, str] | None = None,
+    uncertainty_notes: list[str] | None = None,
+) -> str:
+    """Build the citable-subset payload for the feedback generate prompt.
+
+    ``evidence_json`` is the full registry dump (``registry.to_json()``).
+    Anything that is not a JSON list of record dicts is returned verbatim
+    — trimming must never break an unfamiliar caller. Record dicts keep
+    their exact shape (same keys/serialization as the full dump); only
+    the subset and the field stripping above differ.
+    """
+    try:
+        records = json.loads(evidence_json)
+    except (TypeError, ValueError):
+        return evidence_json
+    if not isinstance(records, list) or not all(
+        isinstance(r, dict) for r in records
+    ):
+        return evidence_json
+
+    failing_ids: set[str] = set()
+    for t in failing_tests or []:
+        if t.get("evidence_id"):
+            failing_ids.add(str(t["evidence_id"]))
+    for rec in (trusted_results or {}).values():
+        if not rec.get("passed", True) and rec.get("evidence_id"):
+            failing_ids.add(str(rec["evidence_id"]))
+
+    payload: list[Any] = []
+    for rec in records:
+        if rec.get("kind") == "test_result":
+            data = rec.get("data") or {}
+            confirmed_failure = (
+                data.get("passed") is False or rec.get("id") in failing_ids
+            )
+            if not confirmed_failure:
+                continue  # passing outcome: counted below, not serialized
+        payload.append(_strip_payload_value(rec))
+
+    if trusted_results:
+        payload.append({
+            "kind": "test_outcome_summary",
+            "trusted_tests": len(trusted_results),
+            "passed": sum(
+                1 for r in trusted_results.values() if r.get("passed")),
+            "failed": sum(
+                1 for r in trusted_results.values() if not r.get("passed")),
+        })
+    if metric_scores is not None:
+        payload.append({
+            "kind": "metric_summary",
+            "metrics": [
+                {
+                    "name": name,
+                    "status": (analyzer_statuses or {}).get(name),
+                    "score": score,
+                }
+                for name, score in metric_scores.items()
+            ],
+        })
+    if uncertainty_notes:
+        payload.append({
+            "kind": "run_limitations",
+            "limitations": list(uncertainty_notes),
+        })
+    return json.dumps(payload, indent=1)
+
+
 def finalize_feedback(
     *,
     evidence_json: str,
@@ -543,11 +686,23 @@ def finalize_feedback(
     if gateway is None:
         return _fallback("no LLM gateway for this run")
 
+    # The generate prompt carries the citable subset of the evidence
+    # (see build_feedback_prompt_payload). Verification below and the
+    # opt-in audit keep using the FULL registry / evidence_json.
+    prompt_payload = build_feedback_prompt_payload(
+        evidence_json,
+        trusted_results=trusted_results,
+        failing_tests=failing_tests,
+        metric_scores=metric_scores,
+        analyzer_statuses=analyzer_statuses,
+        uncertainty_notes=uncertainty_notes,
+    )
+
     prompt_note = ""
     for attempt in range(max_retries + 1):
         attempts = attempt + 1
         try:
-            payload = evidence_json + prompt_note
+            payload = prompt_payload + prompt_note
             feedback, info = generate_feedback(payload, gateway)
         except (OllamaUnreachable, OllamaModelMissing) as exc:
             # The server is unreachable or the model is gone: no later

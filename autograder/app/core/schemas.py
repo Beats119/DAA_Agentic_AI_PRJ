@@ -94,6 +94,17 @@ class TestGenerationPolicy(StrictModel):
     max_candidates: int = Field(gt=0, default=24)
     token_budget: int = Field(gt=0, default=20000)
     exec_budget: int = Field(gt=0, default=120)
+    # Per-assignment cache (product policy, 2026-10-22): the extracted
+    # specification and the oracle-validated test set are produced ONCE
+    # per assignment (keyed by assignment content + model + prompt
+    # versions; test sets additionally by this rules config's hash) and
+    # reused for later evaluations of the same assignment. Set to false
+    # to disable cache READS for this ruleset — every run then extracts
+    # and generates fresh (a CLI ``--force-regenerate`` does the same
+    # per run). Rules files written before this field existed load with
+    # reuse ON, the new product default. Student-specific work (compile,
+    # execution, analysis, scoring, feedback) is never cached.
+    reuse_cached_testset: bool = True
 
 
 class OraclePolicy(StrictModel):
@@ -265,6 +276,14 @@ class ExpectedOutput(StrictModel):
 # ---------------------------------------------------------------------------
 
 
+# Nothing in grading reads a candidate's rationale — it is a one-phrase
+# note for human readers. At local-inference speeds every rationale token
+# is pure generation cost, so over-long rationales are CLIPPED to this
+# many characters at the schema boundary instead of being rejected: a
+# verbose rationale must never fail validation and trigger a retry.
+RATIONALE_MAX_CHARS = 140
+
+
 class TestCandidate(StrictModel):
     """Raw LLM-proposed test case, before validation and oracle assessment.
 
@@ -279,6 +298,13 @@ class TestCandidate(StrictModel):
     rationale: str = ""
     requirement_refs: list[str] = Field(default_factory=list)
     expected_value: str
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def _clip_rationale(cls, value: Any) -> Any:
+        if isinstance(value, str) and len(value) > RATIONALE_MAX_CHARS:
+            return value[:RATIONALE_MAX_CHARS]
+        return value
 
 
 class OracleVerdict(StrictModel):
@@ -574,6 +600,16 @@ class RunDiagnostics(StrictModel):
     tier3_skipped_by_policy: int = Field(default=0, ge=0)
     tier3_budget_exhausted: int = Field(default=0, ge=0)
     generation_rounds: int = Field(default=0, ge=0)
+    # Per-assignment cache outcome for this run (provenance only — the
+    # fingerprint prefix identifies which cache entry was consulted;
+    # the source fields name the run that originally produced the
+    # reused spec/test set and when). Both hits False means the run
+    # generated everything itself (or the cache was disabled/bypassed).
+    cache_fingerprint: str = ""
+    cache_spec_hit: bool = False
+    cache_testset_hit: bool = False
+    cache_source_run_id: str | None = None
+    cache_source_created_at: datetime | None = None
     # Sandbox executions charged to the run's shared execution budget
     # (reference-solution runs, correctness test runs, analyzer runs).
     sandbox_executions: int = Field(default=0, ge=0)
